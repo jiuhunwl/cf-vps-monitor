@@ -15,6 +15,7 @@ import { normalizeMfaCode, type MfaMethod } from '../utils/mfa';
 type RecoveryStatus = {
   admin_present: boolean;
   recoverable: boolean;
+  secret_key_required?: boolean;
 };
 
 function safeLogoUrl(value: unknown) {
@@ -147,7 +148,7 @@ export default function Login() {
 
   const handleRecoverySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const needsSecretKey = recoveryStatus?.admin_present === true;
+    const needsSecretKey = recoveryStatus?.secret_key_required === true;
     if ((needsSecretKey && !recoveryKey) || !recoveryUsername || !recoveryPassword) {
       toast.error(needsSecretKey ? '请填写 Supabase Secret key、用户名和新密码' : '请填写用户名和密码');
       return;
@@ -175,7 +176,7 @@ export default function Login() {
       setPassword('');
       setRecoveryPassword('');
       setRecoveryKey('');
-      setRecoveryStatus({ admin_present: true, recoverable: true });
+      setRecoveryStatus({ admin_present: true, recoverable: true, secret_key_required: recoveryStatus?.secret_key_required });
       setRecoveryMode(false);
     } catch {
       toast.error('请求失败，请稍后重试');
@@ -185,7 +186,7 @@ export default function Login() {
   };
 
   const recoveryTitle = recoveryStatus?.admin_present ? '重置管理员' : '创建管理员';
-  const needsSecretKey = recoveryStatus?.admin_present === true;
+  const needsSecretKey = recoveryStatus?.secret_key_required === true;
 
   return (
     <div className="login-page">

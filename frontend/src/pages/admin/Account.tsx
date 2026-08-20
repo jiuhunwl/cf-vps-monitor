@@ -122,7 +122,7 @@ export default function AdminAccount() {
   const handleChangePassword = async () => {
     if (!oldPassword || !newPassword || !confirmPassword) { toast.error('请填写所有字段'); return; }
     if (newPassword !== confirmPassword) { toast.error('两次输入的新密码不一致'); return; }
-    if (newPassword.length < 6) { toast.error('密码长度至少 6 位'); return; }
+    if (Array.from(newPassword).length < 10) { toast.error('密码长度至少 10 位'); return; }
 
     setSaving(true);
     try {

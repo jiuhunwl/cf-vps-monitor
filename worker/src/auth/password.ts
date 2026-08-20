@@ -1,11 +1,11 @@
 const PASSWORD_ALGORITHM = 'pbkdf2_sha256';
-const PBKDF2_ITERATIONS = 10000;
+const PBKDF2_ITERATIONS = 100000;
 const MIN_ACCEPTED_PBKDF2_ITERATIONS = 10000;
 const SALT_BYTES = 16;
 const HASH_BYTES = 32;
 const LEGACY_SALT = 'cf-monitor-salt';
 const LEGACY_SHA256_HEX_RE = /^[a-f0-9]{64}$/i;
-const MIN_ADMIN_PASSWORD_LENGTH = 6;
+const MIN_ADMIN_PASSWORD_LENGTH = 10;
 
 type ParsedPasswordHash = {
   iterations: number;

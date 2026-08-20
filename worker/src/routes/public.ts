@@ -1005,6 +1005,7 @@ publicRoutes.get('/admin/recovery/status', async (c) => {
   return c.json({
     admin_present: userCount > 0,
     recoverable: userCount <= 1,
+    secret_key_required: Boolean(resolveSupabaseApiKey(c.env)),
   });
 });
 
@@ -1029,11 +1030,14 @@ publicRoutes.post('/admin/recovery', async (c) => {
   if (userCount > 1) {
     return c.json({ error: '当前存在多个管理员账号，请登录后在账户管理中修改密码' }, 409);
   }
-  if (userCount === 1) {
+  // 首次创建（userCount === 0）与重置（userCount === 1）都必须校验 Supabase Secret key，
+  // 防止部署后管理员尚未初始化时被抢注。仅当环境未配置 key 时才跳过（此时数据库访问本身会失败）。
+  const configuredKey = resolveSupabaseApiKey(c.env);
+  if (configuredKey) {
     if (!serviceRoleKey || serviceRoleKey.length > MAX_ADMIN_RECOVERY_KEY_LENGTH) {
       return c.json({ error: 'Supabase Secret key 无效' }, 400);
     }
-    if (!await timingSafeEqualString(serviceRoleKey, resolveSupabaseApiKey(c.env))) {
+    if (!await timingSafeEqualString(serviceRoleKey, configuredKey)) {
       return c.json({ error: 'Supabase Secret key 无效' }, 403);
     }
   }
