@@ -561,16 +561,35 @@ export class LiveDataDO {
     return safeReport as MonitorReportPayload;
   }
 
+  // 对外输出前按观众身份脱敏：游客（非管理员）不应看到服务器 IP。管理员（includeHidden）
+  // 仍可看到公网 IP，用于后台展示。防御性同时剔除 token/authorization/password。
+  private redactReportForPublicViewer(report: MonitorReportPayload): MonitorReportPayload {
+    const {
+      ipv4: _ipv4,
+      ipv6: _ipv6,
+      token: _token,
+      authorization: _authorization,
+      password: _password,
+      ...safe
+    } = report as MonitorReportPayload & Record<string, unknown>;
+    return safe as MonitorReportPayload;
+  }
+
   private buildSnapshot(includeHidden = false): LiveSnapshot {
     const now = Date.now();
     const onlineClients = Array.from(this.clients.values())
       .filter(c => (includeHidden || !c.hidden) && (!c.expiresAt || c.expiresAt > now))
-      .map(c => ({
-        ...(c.lastReport || {}),
-        uuid: c.uuid,
-        name: c.name,
-        lastReportTime: c.lastReportTime,
-      }));
+      .map(c => {
+        const report = includeHidden || !c.lastReport
+          ? c.lastReport
+          : this.redactReportForPublicViewer(c.lastReport);
+        return {
+          ...(report || {}),
+          uuid: c.uuid,
+          name: c.name,
+          lastReportTime: c.lastReportTime,
+        };
+      });
     const liveData = onlineClients.reduce<Record<string, LiveSnapshotClient>>((acc, client) => {
       acc[client.uuid] = client;
       return acc;
@@ -1041,7 +1060,8 @@ export class LiveDataDO {
   }
 
   private broadcastToViewers(message: JsonObject, audience: 'all' | 'public' | 'admin' = 'all') {
-    let payload = '';
+    let adminPayload = '';
+    let publicPayload = '';
     for (const [id, session] of this.sessions) {
       if (this.sessionRoles.get(id) !== 'viewer' || session.readyState !== WebSocket.READY_STATE_OPEN) {
         continue;
@@ -1050,12 +1070,24 @@ export class LiveDataDO {
       if (audience === 'admin' && !includeHidden) continue;
       if (audience === 'public' && includeHidden) continue;
       try {
-        payload ||= JSON.stringify(message);
+        const payload = includeHidden
+          ? (adminPayload ||= JSON.stringify(message))
+          : (publicPayload ||= JSON.stringify(this.redactMessageForPublicViewer(message)));
         session.send(payload);
       } catch {
         // Close/error handlers clean up broken viewer sockets.
       }
     }
+  }
+
+  // 增量广播（'update' 等）对游客脱敏：剔除 data 载荷中的 ipv4/ipv6，避免公网 IP 经 WebSocket 推送泄露。
+  private redactMessageForPublicViewer(message: JsonObject): JsonObject {
+    const data = message?.data;
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      const { ipv4: _ipv4, ipv6: _ipv6, ...safeData } = data as JsonObject;
+      return { ...message, data: safeData };
+    }
+    return message;
   }
 
   private broadcastMetadataChanged(detail: JsonObject = {}, audience: 'all' | 'public' | 'admin' = 'all') {

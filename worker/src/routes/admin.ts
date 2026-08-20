@@ -2236,11 +2236,15 @@ adminRoutes.get('/settings', async (c) => {
       scoped.webhook_headers_set = settings.webhook_headers_json ? 'true' : 'false';
       scoped.webhook_password_set = settings.webhook_password ? 'true' : 'false';
       scoped.webhook_url_host = webhookUrlHost(settings.webhook_url);
+      scoped.telegram_bot_token_set = settings.telegram_bot_token ? 'true' : 'false';
+      scoped.telegram_chat_id_set = settings.telegram_chat_id ? 'true' : 'false';
       delete scoped['email_smtp_password'];
       delete scoped['webhook_url'];
       delete scoped['webhook_secret'];
       delete scoped['webhook_headers_json'];
       delete scoped['webhook_password'];
+      delete scoped['telegram_bot_token'];
+      delete scoped['telegram_chat_id'];
     }
     if (!fresh) adminSettingsScopeCache.set(scope, { value: scoped, expiresAt: Date.now() + ADMIN_SETTINGS_SCOPE_CACHE_MS });
     return c.json(scoped);
@@ -2264,6 +2268,8 @@ adminRoutes.post('/settings', async (c) => {
     delete settingsBody.webhook_headers_set;
     delete settingsBody.webhook_password_set;
     delete settingsBody.webhook_url_host;
+    delete settingsBody.telegram_bot_token_set;
+    delete settingsBody.telegram_chat_id_set;
     const clearWebhookUrl = settingsBody.webhook_url_clear === true || settingsBody.webhook_url_clear === 'true';
     const clearWebhookSecret = settingsBody.webhook_secret_clear === true || settingsBody.webhook_secret_clear === 'true';
     delete settingsBody.webhook_url_clear;

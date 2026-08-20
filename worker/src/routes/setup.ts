@@ -482,6 +482,17 @@ setupRoutes.post('/database/init', async (c) => {
     return c.json({ error: 'SUPABASE_URL is not configured as a Supabase project URL.' }, 503);
   }
 
+  // 初始化完成后锁定：该接口无鉴权，仅应在首次部署初始化阶段可用，防止部署后被滥用触发迁移执行。
+  let database: AppDatabase | null = null;
+  try {
+    database = getDatabase(c.env);
+  } catch {
+    database = null;
+  }
+  if (database && await adminAccountStatus(database) === 'present') {
+    return c.json({ error: 'Setup has already been completed.' }, 403);
+  }
+
   let payload: { accessToken?: unknown };
   try {
     payload = await c.req.json() as { accessToken?: unknown };

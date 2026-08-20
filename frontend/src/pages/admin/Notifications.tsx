@@ -460,6 +460,8 @@ export default function AdminNotifications() {
     delete payload.webhook_headers_set;
     delete payload.webhook_password_set;
     delete payload.webhook_url_host;
+    delete payload.telegram_bot_token_set;
+    delete payload.telegram_chat_id_set;
     if (!payload.email_smtp_password) {
       delete payload.email_smtp_password;
     }
@@ -890,7 +892,7 @@ export default function AdminNotifications() {
                           description="从 @BotFather 获取"
                           value={settings.telegram_bot_token || ''}
                           onChange={(value) => updateSetting('telegram_bot_token', value)}
-                          placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+                          placeholder={settings.telegram_bot_token_set === 'true' ? '已保存 Token，留空则不修改' : '123456789:ABCdefGHIjklMNOpqrsTUVwxyz'}
                           width="52ch"
                         />
                       </div>
@@ -900,7 +902,7 @@ export default function AdminNotifications() {
                           description="群组或用户 Chat ID"
                           value={settings.telegram_chat_id || ''}
                           onChange={(value) => updateSetting('telegram_chat_id', value)}
-                          placeholder="-1001234567890"
+                          placeholder={settings.telegram_chat_id_set === 'true' ? '已保存 Chat ID，留空则不修改' : '-1001234567890'}
                           width="18ch"
                         />
                       </div>

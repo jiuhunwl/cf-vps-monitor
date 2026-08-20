@@ -105,8 +105,10 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
   const gpuData = asObject(report.gpu);
   const gpus = normalizeGpuList(gpuData, report.gpus);
 
-  return {
-    ...report,
+  // 显式字段白名单：仅保留受控字段，避免 agent 上报的任意字段（如 ping_results、
+  // website_probe_results、basic_info、token、authorization、password 等，可能含内网
+  // 目标地址）透传进实时快照与广播。这些字段已由独立 handler 从原始报文单独持久化。
+  const result: MonitorReportPayload = {
     cpu: boundedNumber(0, MAX_PERCENT, report.cpu, cpu.usage),
     gpu: boundedNumber(0, MAX_PERCENT, report.gpu, gpuData.average_usage),
     ram: boundedNumber(0, MAX_COUNTER_VALUE, report.ram, ram.used),
@@ -128,6 +130,15 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     version: boundedString(report.version, 64),
     gpus,
   };
+
+  const ipv4 = boundedString(report.ipv4, 64);
+  const ipv6 = boundedString(report.ipv6, 64);
+  const region = boundedString(report.region, 128);
+  if (ipv4) result.ipv4 = ipv4;
+  if (ipv6) result.ipv6 = ipv6;
+  if (region) result.region = region;
+
+  return result;
 }
 
 export function toMonitorRecord(client: string, time: string, input: unknown): MonitorRecord {
