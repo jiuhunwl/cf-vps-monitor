@@ -210,7 +210,6 @@ as $$
     select *
     from clients
     where token_hash = input_token_hash
-       or (coalesce(input_token, '') <> '' and token = input_token)
     limit 1
   ) row_data;
 $$;
@@ -225,7 +224,6 @@ as $$
     select 1
     from clients
     where token_hash = input_token_hash
-       or (coalesce(input_token, '') <> '' and token = input_token)
     limit 1
   );
 $$;
@@ -242,7 +240,6 @@ as $$
       select 1
       from clients
       where token_hash = input_token_hash
-         or (coalesce(input_token, '') <> '' and token = input_token)
     ) then 'token'
     else null
   end;
@@ -276,7 +273,6 @@ as $$
     select uuid, coalesce(token, '') as token, token_last_used_ip, token_rotated_at, created_at, name, hidden
     from clients
     where token_hash = input_token_hash
-       or (coalesce(input_token, '') <> '' and token = input_token)
     limit 1
   ) row_data;
 $$;

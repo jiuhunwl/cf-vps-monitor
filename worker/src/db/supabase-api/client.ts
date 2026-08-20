@@ -187,7 +187,6 @@ export async function getSupabaseClientByToken(env: SupabaseApiEnv, token: strin
   const tokenHash = await hashAgentToken(token);
   return callSupabaseRpc<Client | null>(env, 'cfm_agent_client_by_token', {
     input_token_hash: tokenHash,
-    input_token: token,
   }).then(normalizeClientBooleans);
 }
 
@@ -195,7 +194,6 @@ export async function getSupabaseClientIdentityByToken(env: SupabaseApiEnv, toke
   const tokenHash = await hashAgentToken(token);
   return callSupabaseRpc<ClientIdentity | null>(env, 'cfm_agent_client_identity_by_token', {
     input_token_hash: tokenHash,
-    input_token: token,
   }).then(normalizeClientBooleans);
 }
 
@@ -203,7 +201,6 @@ export async function supabaseClientTokenExists(env: SupabaseApiEnv, token: stri
   const tokenHash = await hashAgentToken(token);
   return callSupabaseRpc<boolean>(env, 'cfm_client_token_exists', {
     input_token_hash: tokenHash,
-    input_token: token,
   });
 }
 
@@ -212,7 +209,6 @@ export async function getSupabaseClientCreateConflict(env: SupabaseApiEnv, uuid:
   return callSupabaseRpc<'uuid' | 'token' | null>(env, 'cfm_client_create_conflict', {
     input_uuid: uuid,
     input_token_hash: tokenHash,
-    input_token: token,
   });
 }
 
