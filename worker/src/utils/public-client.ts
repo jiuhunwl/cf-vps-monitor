@@ -9,6 +9,10 @@ export type PublicClient = Omit<PublicClientRow, 'ipv4' | 'ipv6'> & {
 
 type PublicClientSource = PublicClientRow & {
   token?: unknown;
+  token_hash?: unknown;
+  token_last_used_at?: unknown;
+  token_last_used_ip?: unknown;
+  token_rotated_at?: unknown;
   remark?: unknown;
 };
 
@@ -30,6 +34,10 @@ export function sanitizePublicTags(tags: unknown): string {
 export function toPublicClient(client: PublicClientSource): PublicClient {
   const {
     token: _token,
+    token_hash: _tokenHash,
+    token_last_used_at: _tokenLastUsedAt,
+    token_last_used_ip: _tokenLastUsedIp,
+    token_rotated_at: _tokenRotatedAt,
     ipv4,
     ipv6,
     remark: _remark,

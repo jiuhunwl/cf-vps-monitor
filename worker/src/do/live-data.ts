@@ -1353,7 +1353,15 @@ export class LiveDataDO {
   private sanitizeAdminClientSnapshotItem(client: JsonObject): JsonObject | null {
     const uuid = typeof client.uuid === 'string' ? client.uuid.trim() : '';
     if (!uuid) return null;
-    const { token: _token, token_hash: _tokenHash, ...safe } = client;
+    const {
+      token: _token,
+      token_hash: _tokenHash,
+      token_last_used_at: _tokenLastUsedAt,
+      token_last_used_ip: _tokenLastUsedIp,
+      token_rotated_at: _tokenRotatedAt,
+      remark: _remark,
+      ...safe
+    } = client;
     for (const field of ['ipv4', 'ipv6'] as const) {
       const value = safe[field];
       if (typeof value === 'string' && value.trim() !== '' && !isPublicIpAddress(value)) {
