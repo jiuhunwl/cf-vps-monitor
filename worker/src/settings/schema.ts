@@ -600,7 +600,8 @@ export function buildAdminSettings(stored: Record<string, string>): Record<strin
 export function redactSensitiveSettings(settings: Record<string, string>): Record<string, string> {
   const redacted: Record<string, string> = { ...settings };
   for (const key of SETTING_KEYS) {
-    if (SETTING_SCHEMA[key].sensitive && redacted[key]) {
+    const definition = SETTING_SCHEMA[key] as SettingDefinition;
+    if (definition.sensitive && redacted[key]) {
       redacted[`${key}_set`] = 'true';
       delete redacted[key];
     }
