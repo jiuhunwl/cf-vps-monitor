@@ -13,7 +13,7 @@ import { buildTotpUri, generateTotpSecret, verifyTotpCode } from '../auth/totp';
 import { invalidateAdminSessionCache } from '../auth/admin-session';
 import { hashPassword, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
 import { clearMfaStepUpCookie, setAdminSessionCookie, setMfaStepUpCookie } from '../auth/session';
-import { SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
+import { SETTING_SCHEMA, buildAdminSettings, redactSensitiveSettings, sanitizeSettingsForStorage } from '../settings/schema';
 import {
   BACKUP_ENCRYPTION_ALGORITHM,
   ENCRYPTED_BACKUP_SCHEMA_ID,
@@ -2251,7 +2251,7 @@ adminRoutes.get('/settings', async (c) => {
   }
 
   const settings = await db.getAllSettings(database, isQueryFlagEnabled(c.req.query('refresh')));
-  return c.json(buildAdminSettings(settings));
+  return c.json(redactSensitiveSettings(buildAdminSettings(settings)));
 });
 
 // 修改设置

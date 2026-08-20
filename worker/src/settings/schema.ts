@@ -595,6 +595,19 @@ export function buildAdminSettings(stored: Record<string, string>): Record<strin
   return settings;
 }
 
+// 对敏感字段脱敏：删除明文，仅返回 `${key}_set` 布尔标记「已配置」。
+// 用于无 scope 的全量读取场景，避免一次性把 telegram/webhook/smtp 等明文凭据与超大 logo 数据返回给浏览器。
+export function redactSensitiveSettings(settings: Record<string, string>): Record<string, string> {
+  const redacted: Record<string, string> = { ...settings };
+  for (const key of SETTING_KEYS) {
+    if (SETTING_SCHEMA[key].sensitive && redacted[key]) {
+      redacted[`${key}_set`] = 'true';
+      delete redacted[key];
+    }
+  }
+  return redacted;
+}
+
 export type PublicThemeSettings = {
   backgroundImageUrlDesktop: string;
   backgroundImageUrlMobile: string;
