@@ -26,7 +26,7 @@ import type { PublicSettings } from '../settings/schema';
 import { toPublicClient } from '../utils/public-client';
 import type { PublicClient } from '../utils/public-client';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
-import { getCloudflareClientIp } from '../utils/request-ip';
+import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
 import { base64ToBytes } from '../utils/theme-package';
@@ -608,9 +608,22 @@ async function getPublicPingTasks(
     .filter((task): task is db.PingTask => Boolean(task));
 }
 
+function isIpLiteral(value: string): boolean {
+  const ip = value.trim().replace(/^\[|\]$/g, '');
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) || ip.includes(':');
+}
+
+// 公开出口对 ping 目标脱敏：内网 IP 字面量对游客隐藏，公网 IP 与域名保持原样。
+function sanitizePublicPingTarget(target: string): string {
+  const trimmed = (target || '').trim();
+  if (isIpLiteral(trimmed) && !isPublicIpAddress(trimmed)) return '';
+  return target;
+}
+
 function toPublicPingTask(task: db.PingTask, publicClientIds: Set<string>): db.PingTask | null {
+  const target = sanitizePublicPingTarget(task.target);
   if (task.all_clients) {
-    return { ...task, clients: [] };
+    return { ...task, clients: [], target };
   }
 
   const clients = task.clients.filter(uuid => publicClientIds.has(uuid));
@@ -619,6 +632,7 @@ function toPublicPingTask(task: db.PingTask, publicClientIds: Set<string>): db.P
   return {
     ...task,
     clients,
+    target,
   };
 }
 
