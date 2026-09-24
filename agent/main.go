@@ -1569,7 +1569,7 @@ func fallbackInterfaceIPs() (string, string) {
 			case *net.IPAddr:
 				ip = value.IP
 			}
-			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			if ip == nil || isBlockedTargetIP(ip) {
 				continue
 			}
 			if ip4 := ip.To4(); ip4 != nil {
