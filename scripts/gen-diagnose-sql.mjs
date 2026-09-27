@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
-const sql = readFileSync(join(root, 'supabase/migrations/UPGRADE_ALL_safe.sql'), 'utf8');
+const sql = readFileSync(join(root, 'supabase/tools/UPGRADE_ALL_safe.sql'), 'utf8');
 
 // 去掉行注释，避免误匹配
 const clean = sql.replace(/--[^\n]*/g, '');
@@ -156,7 +156,7 @@ const out = `-- ================================================================
 --
 -- 判定：
 --   - 全部 OK            -> 数据库已是最新，无需执行 UPGRADE_ALL_safe.sql
---   - 有「缺失」           -> 执行 supabase/migrations/UPGRADE_ALL_safe.sql 后再跑一次本脚本
+--   - 有「缺失」           -> 执行 supabase/tools/UPGRADE_ALL_safe.sql 后再跑一次本脚本
 --  本文件由官方迁移文件解析生成，共 ${total} 个检查项
 -- =====================================================================
 
@@ -294,7 +294,7 @@ from (
 order by 通过, 检查项;
 `;
 
-writeFileSync(join(root, 'supabase/migrations/DIAGNOSE_db_state.sql'), out);
+writeFileSync(join(root, 'supabase/tools/DIAGNOSE_db_state.sql'), out);
 const t = [...tables.entries()].map(([k, v]) => `${k}(${v.size})`).join(' ');
 console.log(`tables: ${tables.size} ${t}`);
 console.log(`columns: ${[...tables.values()].reduce((a, s) => a + s.size, 0)}`);
