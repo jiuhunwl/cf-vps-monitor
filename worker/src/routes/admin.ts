@@ -1685,11 +1685,13 @@ adminRoutes.post('/clients/:uuid/token/rotate', async (c) => {
   invalidateAdminPublicMetadata(c);
   invalidateAgentClientAuthCache(client);
   invalidateAgentClientAuthCache({ uuid, token });
-  await Promise.all([
-    disconnectLiveClient(c, uuid).catch(() => undefined),
-    updatedClient ? syncAgentAuthClient(c, updatedClient) : Promise.resolve(),
-    purgeAdminClientsEdgeCache(c),
-  ]);
+  // 顺序固定为「先撤旧、再授新」。并发发出时两个请求到 DO 的先后不可控，而撤旧是按
+  // uuid 索引去删快照的 —— 一旦授新先落地，索引就指向新 hash，撤旧便删不掉旧凭据。
+  // DO 侧已改成与调用顺序无关地回收孤儿快照（upsertAgentAuthSnapshot），这里再固定顺序，
+  // 是为了让「断开旧连接」一定发生在「下发新凭据」之前，且两者失败互不掩盖。
+  await disconnectLiveClient(c, uuid).catch(() => undefined);
+  if (updatedClient) await syncAgentAuthClient(c, updatedClient).catch(() => undefined);
+  await purgeAdminClientsEdgeCache(c);
   await db.insertAuditLog(database, c.get('username')!, 'client_token_rotate', `重置客户端 Token: ${client.name || uuid}`);
   return c.json({ success: true, token });
 });
@@ -2924,6 +2926,10 @@ adminRoutes.post('/account/chpasswd', async (c) => {
       return c.json({ error: '用户不存在' }, 404);
     }
     invalidateAdminSessionCache(userId);
+    // 改密会轮换 session_version，但边缘缓存里键在**旧** session_version 上的「已鉴权」标记
+    // 仍然存在，会让被轮换掉的旧 cookie 在 ADMIN_SESSION_EDGE_CACHE_SECONDS 内继续放行。
+    // 改用户名与登出都会清它，这条路径漏了——补上（用改密前的版本号）。
+    await deleteAdminSessionEdgeCache(c, userId, user.session_version);
 
     let token: string;
     try {

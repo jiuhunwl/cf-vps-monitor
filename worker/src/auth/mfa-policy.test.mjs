@@ -7,6 +7,8 @@ const protectedRequests = [
   ['POST', '/api/admin/account/chpasswd'],
   ['POST', '/api/admin/clients/node-1/remove'],
   ['POST', '/api/admin/clients/batch-remove'],
+  // 新增节点与按 uuid 重发 Token 是同一件事：两者都在响应里下发明文 Agent 凭据。
+  ['POST', '/api/admin/clients/add'],
   ['POST', '/api/admin/clients/node-1/token'],
   ['POST', '/api/admin/clients/node-1/token/install'],
   ['POST', '/api/admin/clients/node-1/token/rotate'],

@@ -97,6 +97,12 @@ const AGENT_WS_MAX_MESSAGE_BYTES = 512 * 1024;
 // Cloudflare permits 16,384 bytes; leave room for structured-clone overhead.
 const AGENT_ATTACHMENT_BUDGET_BYTES = 12 * 1024;
 const AGENT_REPORT_MAX_BATCH = 300;
+// 「第一个观众进来就催所有节点立刻上报」这条扇出只由 0 -> 1 的观众数跃迁触发，
+// 而跃迁是**匿名观众**可以随意制造的：连上再断开就能反复把计数打回 0。
+// 每次跃迁都会让全网节点立刻上报一轮，等于用一个公开的 viewer 连接去消耗
+// 所有节点的上报配额与 DO 的 CPU。因此同一窗口内只认第一次催报；
+// 之后的跃迁照常广播（mode 仍会切成 active），只是不再重复催报。
+const AGENT_REPORT_NOW_MIN_INTERVAL_MS = 30_000;
 const VIEWER_MIN_TTL_MS = 60_000;
 const VIEWER_MAX_TTL_MS = 60 * 60 * 1000;
 const VIEWER_DEFAULT_TTL_MS = 120 * 1000;
@@ -408,6 +414,8 @@ export class LiveDataDO {
   private sessions: Map<string, WebSocket>; // WebSocket 连接
   private sessionRoles: Map<string, SessionRole>;
   private viewerExpiresAt: Map<string, number>;
+  // 上一次「催报」的时间戳（进程内即可：DO 因 WebSocket 连接常驻，重启后至多多催一次）。
+  private lastReportNowBroadcastAt: number = 0;
   private clients: Map<string, ClientState>; // 在线客户端状态
   private lastKnownClients = new Map<string, ClientState>();
   private clientReportWrites = new Map<string, Promise<unknown>>();
@@ -1256,10 +1264,18 @@ export class LiveDataDO {
     reportNow = false,
     forceRefreshSettings = false,
   ): Promise<void> {
+    const effectiveReportNow = reportNow && this.claimReportNowWindow(now);
     for (const [id, session] of this.sessions) {
       if (this.sessionRoles.get(id) !== 'agent') continue;
-      this.sendAgentPolicy(session, await this.buildAgentPolicy(now, reportNow, forceRefreshSettings, id));
+      this.sendAgentPolicy(session, await this.buildAgentPolicy(now, effectiveReportNow, forceRefreshSettings, id));
     }
+  }
+
+  // 只允许在时间窗内催报一次。返回 true 表示本次调用获得了催报权。
+  private claimReportNowWindow(now: number): boolean {
+    if (now - this.lastReportNowBroadcastAt < AGENT_REPORT_NOW_MIN_INTERVAL_MS) return false;
+    this.lastReportNowBroadcastAt = now;
+    return true;
   }
 
   private async removeExpiredClients(now: number) {
@@ -1461,6 +1477,16 @@ export class LiveDataDO {
     const client = normalizeAgentAuthSnapshot(parsed.body.client || parsed.body);
     if (!client) {
       return Response.json({ error: 'Invalid agent auth snapshot' }, { status: 400 });
+    }
+    // 一个 uuid 只能有一个生效的凭据快照。原先这里只做「写新」，旧 hash 的条目靠
+    // removeAgentAuthByUuid 去删；但轮换 Token 时 disconnect 与 upsert 是两个独立 fetch
+    // （admin.ts 里并发发出，顺序不可控），一旦 upsert 先落地，uuid 索引就指向了新 hash，
+    // 之后按 uuid 删除只会删掉新快照，**旧 hash 的快照变成永远删不掉的孤儿**，
+    // 于是「重置 Token」后旧 Token 依然能通过鉴权（client.ts 的 DO 查询早于 DB 查询）。
+    // 快照表是 uuid -> hash 一对一的，所以由写入方自己回收上一个 hash 才是唯一不依赖调用顺序的做法。
+    const previousHash = await this.state.storage.get<string>(`${AGENT_AUTH_UUID_PREFIX}${client.uuid}`);
+    if (previousHash && previousHash !== client.token_hash) {
+      await this.state.storage.delete(`${AGENT_AUTH_SNAPSHOT_PREFIX}${previousHash}`);
     }
     await this.state.storage.put(`${AGENT_AUTH_SNAPSHOT_PREFIX}${client.token_hash}`, client);
     await this.state.storage.put(`${AGENT_AUTH_UUID_PREFIX}${client.uuid}`, client.token_hash);
