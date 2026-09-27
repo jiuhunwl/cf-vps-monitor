@@ -684,19 +684,37 @@ export class LiveDataDO {
     } : client;
   }
 
-  private projectSnapshotClient(client: ClientState, includeHidden: boolean, retained = false): LiveSnapshotClient | null {
+  private projectSnapshotClient(client: ClientState, includeHidden: boolean): LiveSnapshotClient | null {
     const current = this.controlledClientState(client);
     if (!current || (!includeHidden && current.hidden)) return null;
     return {
-      ...this.projectViewerReport(current.uuid, current.lastReport, !retained && includeHidden),
+      ...this.projectViewerReport(current.uuid, current.lastReport),
       uuid: current.uuid,
       name: current.name,
       lastReportTime: current.lastReportTime,
     };
   }
 
-  private projectViewerReport(uuid: string, report: MonitorReportPayload, includeHidden: boolean): JsonObject {
-    const projected: JsonObject = { ...(includeHidden ? report : toPublicReport(report)) };
+  /**
+   * 实时上报的对外投影。
+   *
+   * 原始 report 同时携带节点真实出口 IP（Agent 上报值，或由连接来源 IP 回填，见
+   * sanitizeReport）与 Agent 自定义扩展字段，所以这里**一律**只下发白名单投影：
+   * 即便调用方是已鉴权管理员，也不放行明文地址。
+   *
+   * IP 的「可见性」被拆成两件互不牵连的事，不再共用一个开关：
+   *   - 存在与否：以 has_ipv4/has_ipv6 布尔下发，任何受众都能拿到，与顶层 clients
+   *     已经公开的信息等价，不新增暴露面
+   *   - 明文地址：只走 /api/clients（cfm_admin_clients），那才是真正按管理员鉴权的通道
+   *
+   * 这样公开响应形状与调用方身份无关，从根上消除「同一个公开端点因会话不同而返回不同
+   * 字段」这一类泄露 —— 共享缓存、访问日志、浏览器扩展、代理、截图都会把它带出去。
+   */
+  private projectViewerReport(uuid: string, report: MonitorReportPayload): JsonObject {
+    const projected: JsonObject = { ...toPublicReport(report) };
+    for (const field of ['ipv4', 'ipv6'] as const) {
+      projected[`has_${field}`] = isPublicIpAddress(String((report as Record<string, unknown>)[field] ?? ''));
+    }
     // Agent extensions have no authority over administrative ordering.
     delete projected.sort_order;
     const order = this.adminClientMetadata.get(uuid)?.sort_order;
@@ -719,7 +737,7 @@ export class LiveDataDO {
     const lastKnown: Record<string, LiveSnapshotClient> = {};
     for (const client of this.lastKnownClients.values()) {
       if (onlineIds.has(client.uuid)) continue;
-      const projected = this.projectSnapshotClient(client, includeHidden, true);
+      const projected = this.projectSnapshotClient(client, includeHidden);
       if (projected) lastKnown[client.uuid] = projected;
     }
     const snapshot: LiveSnapshot = {
@@ -1259,7 +1277,7 @@ export class LiveDataDO {
     if (!current) return;
     this.broadcastToViewers({
       type: 'remove', client: current.uuid, reason: 'offline', timestamp: now,
-      last_known: this.projectSnapshotClient(current, true, true),
+      last_known: this.projectSnapshotClient(current, true),
     }, current.hidden ? 'admin' : 'all');
   }
 
@@ -1291,8 +1309,10 @@ export class LiveDataDO {
   }
 
   private broadcastToViewers(message: JsonObject, audience: 'all' | 'public' | 'admin' = 'all') {
-    let publicPayload = '';
-    let adminPayload = '';
+    // 受众差异只体现在「谁收到」：被 hidden 过滤掉的客户端不发。
+    // 投影本身与受众无关（IP 明文一律不下发），所以两端共用同一份字节，
+    // 也就没有「公开/管理两套投影写歪了」的可能。
+    let payload = '';
     for (const [id, session] of this.sessions) {
       if (this.sessionRoles.get(id) !== 'viewer' || session.readyState !== WebSocket.READY_STATE_OPEN) {
         continue;
@@ -1301,17 +1321,10 @@ export class LiveDataDO {
       if (audience === 'admin' && !includeHidden) continue;
       if (audience === 'public' && includeHidden) continue;
       try {
-        if (includeHidden) {
-          adminPayload ||= JSON.stringify(message.type === 'update' && isObjectPayload(message.data)
-            ? { ...message, data: this.projectViewerReport(String(message.client), message.data as MonitorReportPayload, true) }
-            : message);
-          session.send(adminPayload);
-        } else {
-          publicPayload ||= JSON.stringify(message.type === 'update' && isObjectPayload(message.data)
-            ? { ...message, data: this.projectViewerReport(String(message.client), message.data as MonitorReportPayload, false) }
-            : message);
-          session.send(publicPayload);
-        }
+        payload ||= JSON.stringify(message.type === 'update' && isObjectPayload(message.data)
+          ? { ...message, data: this.projectViewerReport(String(message.client), message.data as MonitorReportPayload) }
+          : message);
+        session.send(payload);
       } catch {
         // Close/error handlers clean up broken viewer sockets.
       }

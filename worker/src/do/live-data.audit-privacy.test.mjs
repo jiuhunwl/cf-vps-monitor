@@ -83,7 +83,23 @@ test('AUD-02: all anonymous HTTP and WebSocket live outputs apply the public fie
     assert.deepEqual(snapshot.online, [publicClient.uuid]);
     assert.equal(snapshot.data[publicClient.uuid].cpu, 4);
   }
-  assert.equal(f.object.buildSnapshot(true).data[publicClient.uuid].ipv4, sourceIp, 'authorized internal source IP remains available');
+  // 管理员受众同样拿不到明文地址。IP 可见性拆成两件事：
+  // 「有没有」用 has_ipv4/has_ipv6 布尔表达，明文只走 /api/clients（cfm_admin_clients），
+  // 那是真正按管理员鉴权的通道。这样公开响应形状与调用方身份无关。
+  const adminSnapshot = f.object.buildSnapshot(true);
+  const adminBytes = JSON.stringify(adminSnapshot);
+  for (const address of [sourceIp, privateV4, privateV6]) {
+    assert.ok(!adminBytes.includes(address), `administrator snapshot must not disclose the raw address ${address}`);
+  }
+  const adminClient = adminSnapshot.data[publicClient.uuid];
+  assert.equal(adminClient.has_ipv4, true, 'the administrator still learns that the node has a public IPv4');
+  assert.equal(adminClient.ipv4, undefined, 'raw addresses never leave the DO report projection');
+  assert.equal(adminClient.ipv6, undefined);
+  assert.equal(adminClient.region, undefined, 'Agent/connection-derived region is not an administrative report field');
+  // 匿名受众现在也能拿到存在性布尔，它与顶层 clients 已公开的 has_ipv4 等价，不新增暴露面。
+  const anonClient = f.object.buildSnapshot(false).data[publicClient.uuid];
+  assert.equal(anonClient.has_ipv4, true);
+  assert.equal(anonClient.ipv4, undefined);
   await f.storage.drain();
 });
 
