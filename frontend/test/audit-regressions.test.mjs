@@ -307,24 +307,22 @@ test('AUD-42 older bootstrap and settings responses cannot overwrite newer cache
   }
 });
 
-test('AUD-42 invalidation replaces pending fresh bootstrap requests in both visibility scopes', async (t) => {
-  for (const includeHidden of [false, true]) {
-    await t.test(includeHidden ? 'administrator view' : 'public view', async () => {
-      const requests = [];
-      const bootstrap = productionModule('src/utils/publicBootstrap.ts', {}, {
-        localStorage: syntheticStorage(), fetch: () => new Promise(resolve => requests.push(resolve)),
-      });
-      const older = bootstrap.fetchPublicBootstrap({ cacheBust: true, includeHidden });
-      bootstrap.clearCachedPublicBootstrap();
-      const newer = bootstrap.fetchPublicBootstrap({ cacheBust: true, includeHidden });
-      assert.equal(requests.length, 2, 'an invalidated request cannot satisfy a later metadata refresh');
-      requests[1](new Response(JSON.stringify({ clients: [{ uuid: 'node-a', name: 'new B', hidden: includeHidden }] })));
-      const current = await newer;
-      requests[0](new Response(JSON.stringify({ clients: [{ uuid: 'node-a', name: 'old A', hidden: includeHidden }] })));
-      await older;
-      assert.equal(current.clients[0].name, 'new B');
-    });
-  }
+// bootstrap 只有一种形状：/api/public/bootstrap 不接受 include_hidden，公开首屏用不到
+// 隐藏节点。所以这里不再有「公开 / 管理员」两套可见性作用域可循环。
+test('AUD-42 invalidation replaces a pending fresh bootstrap request', async () => {
+  const requests = [];
+  const bootstrap = productionModule('src/utils/publicBootstrap.ts', {}, {
+    localStorage: syntheticStorage(), fetch: () => new Promise(resolve => requests.push(resolve)),
+  });
+  const older = bootstrap.fetchPublicBootstrap({ cacheBust: true });
+  bootstrap.clearCachedPublicBootstrap();
+  const newer = bootstrap.fetchPublicBootstrap({ cacheBust: true });
+  assert.equal(requests.length, 2, 'an invalidated request cannot satisfy a later metadata refresh');
+  requests[1](new Response(JSON.stringify({ clients: [{ uuid: 'node-a', name: 'new B' }] })));
+  const current = await newer;
+  requests[0](new Response(JSON.stringify({ clients: [{ uuid: 'node-a', name: 'old A' }] })));
+  await older;
+  assert.equal(current.clients[0].name, 'new B');
 });
 
 test('AUD-42 Index keeps newer client state when an earlier bootstrap succeeds or fails late', async (t) => {
@@ -371,7 +369,11 @@ test('AUD-42 Index keeps newer client state when an earlier bootstrap succeeds o
   }
 });
 
-function indexBootstrapFixture(includeHidden = false) {
+/**
+ * 首页（Index）的节点列表是**严格公开**的：bootstrap 不接受 include_hidden，
+ * 首页也不再按登录态切换可见性，因此这里只有一种视图。
+ */
+function indexBootstrapFixture() {
   const requests = [];
   const state = { clients: [], loading: false, error: null, ready: 0 };
   const window = new EventTarget();
@@ -389,7 +391,7 @@ function indexBootstrapFixture(includeHidden = false) {
   });
   let refresh;
   const effect = productionEffect('src/pages/Index.tsx', 'const refreshPublicClients', {
-    authLoading: false, monitorMode: 'servers', isAuthenticated: includeHidden, window, document,
+    authLoading: false, monitorMode: 'servers', isAuthenticated: false, window, document,
     fetchPublicBootstrap: bootstrap.fetchPublicBootstrap, fetchWithBootstrapRetry: bootstrap.auditSelected,
     normalizePublicClients: publicClients.normalizePublicClients,
     applyPublicClientUpdate: productionDeclaration('src/pages/Index.tsx', 'applyPublicClientUpdate', { mergePublicClientPatch: publicClients.mergePublicClientPatch }),
@@ -413,70 +415,58 @@ function indexBootstrapFixture(includeHidden = false) {
   };
 }
 
-test('AUD-42 a partial update during first load retains unaffected nodes and the latest rename', async (t) => {
-  for (const includeHidden of [false, true]) {
-    await t.test(includeHidden ? 'administrator view' : 'public view', async () => {
-      const fixture = indexBootstrapFixture(includeHidden);
-      try {
-        fixture.emit({ clients: { upsert: [{ uuid: 'node-b', name: 'Renamed B' }] } });
-        fixture.emit({ clients: { upsert: [{ uuid: 'node-b', name: 'Latest B' }] } });
-        const loadingAfterPatch = fixture.state.loading;
-        const readyAfterPatch = fixture.state.ready;
-        await fixture.reply(0, { clients: [
-          { uuid: 'node-a', name: 'Unaffected A', hidden: includeHidden },
-          { uuid: 'node-b', name: 'Old B' },
-        ] });
-        assert.deepEqual(fixture.rows(), [['node-a', 'Unaffected A'], ['node-b', 'Latest B']], 'a partial patch cannot replace the full snapshot');
-        assert.equal(loadingAfterPatch, true, 'a partial patch cannot complete the first full load');
-        assert.equal(readyAfterPatch, 0, 'the full list was not ready when only a patch arrived');
-        assert.equal(fixture.state.loading, false);
-        assert.equal(fixture.state.ready, 1);
-      } finally { fixture.cleanup(); }
-    });
-  }
+test('AUD-42 a partial update during first load retains unaffected nodes and the latest rename', async () => {
+  const fixture = indexBootstrapFixture();
+  try {
+    fixture.emit({ clients: { upsert: [{ uuid: 'node-b', name: 'Renamed B' }] } });
+    fixture.emit({ clients: { upsert: [{ uuid: 'node-b', name: 'Latest B' }] } });
+    const loadingAfterPatch = fixture.state.loading;
+    const readyAfterPatch = fixture.state.ready;
+    await fixture.reply(0, { clients: [
+      { uuid: 'node-a', name: 'Unaffected A' },
+      { uuid: 'node-b', name: 'Old B' },
+    ] });
+    assert.deepEqual(fixture.rows(), [['node-a', 'Unaffected A'], ['node-b', 'Latest B']], 'a partial patch cannot replace the full snapshot');
+    assert.equal(loadingAfterPatch, true, 'a partial patch cannot complete the first full load');
+    assert.equal(readyAfterPatch, 0, 'the full list was not ready when only a patch arrived');
+    assert.equal(fixture.state.loading, false);
+    assert.equal(fixture.state.ready, 1);
+  } finally { fixture.cleanup(); }
 });
 
-test('AUD-42 visibility refresh preserves patches when the full request is coalesced', async (t) => {
-  for (const includeHidden of [false, true]) {
-    await t.test(includeHidden ? 'administrator view' : 'public view', async () => {
-      const fixture = indexBootstrapFixture(includeHidden);
-      try {
-        fixture.emit({ clients: { upsert: [{ uuid: 'node-b', name: 'Latest B' }] } });
-        fixture.visible();
-        assert.equal(fixture.requests.length, 1, 'the real bootstrap cache coalesces the visible-page refresh');
-        await fixture.reply(0, { clients: [{ uuid: 'node-a', name: 'Unaffected A' }, { uuid: 'node-b', name: 'Old B' }] });
-        assert.deepEqual(fixture.rows(), [['node-a', 'Unaffected A'], ['node-b', 'Latest B']], 'coalescing must preserve partial updates even without the public cache overlay');
-        assert.equal(fixture.state.ready, 1);
-      } finally { fixture.cleanup(); }
-    });
-  }
+test('AUD-42 visibility refresh preserves patches when the full request is coalesced', async () => {
+  const fixture = indexBootstrapFixture();
+  try {
+    fixture.emit({ clients: { upsert: [{ uuid: 'node-b', name: 'Latest B' }] } });
+    fixture.visible();
+    assert.equal(fixture.requests.length, 1, 'the real bootstrap cache coalesces the visible-page refresh');
+    await fixture.reply(0, { clients: [{ uuid: 'node-a', name: 'Unaffected A' }, { uuid: 'node-b', name: 'Old B' }] });
+    assert.deepEqual(fixture.rows(), [['node-a', 'Unaffected A'], ['node-b', 'Latest B']], 'coalescing must preserve partial updates even without the public cache overlay');
+    assert.equal(fixture.state.ready, 1);
+  } finally { fixture.cleanup(); }
 });
 
-test('AUD-42 partial updates preserve ownership of the latest full refresh', async (t) => {
-  for (const includeHidden of [false, true]) {
-    await t.test(includeHidden ? 'administrator view' : 'public view', async () => {
-      const fixture = indexBootstrapFixture(includeHidden);
-      try {
-        fixture.emit({ force: true });
-        fixture.emit({ clients: { upsert: [{ uuid: 'node-b', name: 'Latest B' }], remove: ['node-c'] } });
-        await fixture.reply(1, { clients: [
-          { uuid: 'node-a', name: 'New A', hidden: includeHidden },
-          { uuid: 'node-b', name: 'Old B' },
-          { uuid: 'node-c', name: 'Deleted C' },
-        ] });
-        assert.deepEqual(fixture.rows(), [['node-a', 'New A'], ['node-b', 'Latest B']], 'the new full snapshot must retain patches received while pending');
-        await fixture.reply(0, { clients: [{ uuid: 'node-a', name: 'Obsolete A' }] });
-        assert.deepEqual(fixture.rows(), [['node-a', 'New A'], ['node-b', 'Latest B']], 'an older full request remains obsolete after the partial update');
-        assert.equal(fixture.state.ready, 1, 'the old request cannot announce another completion');
-      } finally { fixture.cleanup(); }
-    });
-  }
+test('AUD-42 partial updates preserve ownership of the latest full refresh', async () => {
+  const fixture = indexBootstrapFixture();
+  try {
+    fixture.emit({ force: true });
+    fixture.emit({ clients: { upsert: [{ uuid: 'node-b', name: 'Latest B' }], remove: ['node-c'] } });
+    await fixture.reply(1, { clients: [
+      { uuid: 'node-a', name: 'New A' },
+      { uuid: 'node-b', name: 'Old B' },
+      { uuid: 'node-c', name: 'Deleted C' },
+    ] });
+    assert.deepEqual(fixture.rows(), [['node-a', 'New A'], ['node-b', 'Latest B']], 'the new full snapshot must retain patches received while pending');
+    await fixture.reply(0, { clients: [{ uuid: 'node-a', name: 'Obsolete A' }] });
+    assert.deepEqual(fixture.rows(), [['node-a', 'New A'], ['node-b', 'Latest B']], 'an older full request remains obsolete after the partial update');
+    assert.equal(fixture.state.ready, 1, 'the old request cannot announce another completion');
+  } finally { fixture.cleanup(); }
 });
 
 test('AUD-42 a partial update cannot discard full-snapshot fallback or hide its failure', async (t) => {
   for (const fails of [false, true]) {
     await t.test(fails ? 'fallback failure stays visible' : 'fallback retains all nodes and patches', async () => {
-      const fixture = indexBootstrapFixture(true);
+      const fixture = indexBootstrapFixture();
       try {
         await fixture.reply(0, { clients: [{ uuid: 'node-b', name: 'Original B' }] });
         fixture.emit({ force: true });

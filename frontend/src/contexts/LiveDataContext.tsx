@@ -321,11 +321,18 @@ interface LiveDataProviderProps {
   children: React.ReactNode;
   enabled?: boolean;
   viewer?: boolean;
+  /**
+   * 是否允许订阅隐藏节点数据。**必须由路由显式给出，不能只看「已登录」**：
+   * 公开首页即便由已登录管理员访问也不该多要一份隐藏数据 —— 首页用不着它，
+   * 而「恰好已登录」会让同一个公开页面的数据范围随身份变化，边界说不清楚。
+   * 只有管理面板传 true。
+   */
+  admin?: boolean;
 }
 
-export function LiveDataProvider({ children, enabled = true, viewer = true }: LiveDataProviderProps) {
+export function LiveDataProvider({ children, enabled = true, viewer = true, admin = false }: LiveDataProviderProps) {
   const { authLoading, isAuthenticated, user } = useAuth();
-  const includeHidden = !authLoading && isAuthenticated;
+  const includeHidden = !authLoading && isAuthenticated && admin;
   const scopeOwner = useMemo(() => ({}), [authLoading, enabled, includeHidden, viewer, user?.uuid]);
   const liveScopeRef = useRef<ReturnType<typeof createLiveSnapshotScope> | null>(null);
   const [liveData, setLiveData] = useState<LiveDataResponse | null>(null);
@@ -463,10 +470,13 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       pendingMetadataUpdates = updates;
       const liveRequest = scope.beginRead();
       const isCurrent = () => !cancelled && request === settingsRequest;
-      fetchPublicBootstrap({ ...(fresh ? { cache: 'reload' as const, cacheBust: true } : {}), includeHidden })
+      fetchPublicBootstrap({ ...(fresh ? { cache: 'reload' as const, cacheBust: true } : {}) })
         .then((payload) => {
           if (isCurrent()) {
-            if (payload.clients !== undefined) {
+            // bootstrap 恒为公开形状（不含隐藏节点）。它是管理面板那份「含隐藏节点」
+            // 客户端元数据的**子集**，所以只在公开视图里播种它；管理员视图的元数据
+            // 由 /api/clients（cfm_admin_clients）单独提供，不能用子集覆盖。
+            if (!includeHidden && payload.clients !== undefined) {
               setClientMetadata(updates.reduce((clients, update) => mergePublicClientPatch(clients, update, { includeHidden }), payload.clients));
             }
             applyBootstrap(payload, liveRequest);

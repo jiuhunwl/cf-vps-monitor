@@ -26,6 +26,10 @@ async function fixture({ overrides = {} } = {}) {
     getHistoryStorageBytes: async () => ({ total: 0 }),
     getHistoryStorageUsage: async () => ({ live_rows: 0, live_row_bytes: 0, estimated_live_storage_bytes: 0, allocated_bytes: 0, reusable_bytes: null, measurement: 'live-row-bytes-plus-index-estimate' }),
     insertRecord: async () => {}, updateClient: async () => {},
+    // 默认没有任何管理员会话：getUserByUuid 返回 null，hasAdminSession 恒为 false。
+    // 需要「真的被放行」的用例必须自带 overrides，并配一条正向对照断言，
+    // 否则拿到的只是「cookie 无效」这个平凡结论。
+    getUserByUuid: async () => null,
     listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
     ...overrides,
   };
@@ -83,7 +87,7 @@ test('AUD-02: all anonymous HTTP and WebSocket live outputs apply the public fie
   assertPublicBytes(f.viewers[0].messages.filter(message => message.type === 'update'), 'anonymous WS update');
   f.object.sendSnapshot(f.viewers[0].ws);
   assertPublicBytes(f.viewers[0].messages.at(-1), 'anonymous WS snapshot');
-  for (const route of ['/api/live', '/api/ws/live', '/api/live/clients', '/api/public/bootstrap?fresh=1', '/api/live?include_hidden=1']) {
+  for (const route of ['/api/live', '/api/ws/live', '/api/live/clients', '/api/public/bootstrap?_fresh=1', '/api/public/bootstrap?_fresh=1&include_hidden=1', '/api/live?include_hidden=1']) {
     const response = await f.app.fetch(new Request(`https://monitor.example.test${route}`, {
       headers: { 'CF-Connecting-IP': '1.1.1.1' },
     }), f.env, f.executionCtx);
@@ -94,6 +98,19 @@ test('AUD-02: all anonymous HTTP and WebSocket live outputs apply the public fie
     assert.deepEqual(snapshot.online, [publicClient.uuid]);
     assert.equal(snapshot.data[publicClient.uuid].cpu, 4);
   }
+  // 公开 bootstrap 完全不受 include_hidden 影响：首页用不到隐藏节点，所以响应形状
+  // 必须与调用方身份无关。`/api/public/bootstrap?include_hidden=1` 与不带该参数的
+  // 响应必须字段一致（含 assertPublicBytes 已排除 HIDDEN_PRIVATE_NAME）。
+  //
+  // 必须用 `_fresh`（真正的强制重算参数）而不是 `fresh`：publicMetadataResponseCache
+  // 的键只看路径，普通请求的第二次调用会直接命中第一次的缓存，让这条断言变成恒真。
+  const plain = await (await f.app.fetch(new Request('https://monitor.example.test/api/public/bootstrap?_fresh=1'), f.env, f.executionCtx)).json();
+  const asked = await (await f.app.fetch(new Request('https://monitor.example.test/api/public/bootstrap?_fresh=1&include_hidden=1'), f.env, f.executionCtx)).json();
+  assert.deepEqual(Object.keys(asked).sort(), Object.keys(plain).sort());
+  assert.deepEqual(asked.clients.map(client => client.uuid), plain.clients.map(client => client.uuid));
+  assert.deepEqual(asked.nodes.map(node => node.uuid), plain.nodes.map(node => node.uuid));
+  assert.deepEqual(asked.live.online, plain.live.online, 'include_hidden must not widen the live snapshot');
+  assert.ok(!asked.clients.some(client => client.uuid === hiddenClient.uuid), 'the public bootstrap never carries hidden clients');
   // 管理员受众（includeHidden=true）收到的 update 与 snapshot 是
   // /api/public/bootstrap?include_hidden=1 的同一条数据源，此前正是它在放行明文 IP。
   // 允许出现隐藏节点名（assertPublicBytes 不适用），但不允许出现任何明文地址。
@@ -119,6 +136,64 @@ test('AUD-02: all anonymous HTTP and WebSocket live outputs apply the public fie
   const anonClient = f.object.buildSnapshot(false).data[publicClient.uuid];
   assert.equal(anonClient.has_ipv4, true);
   assert.equal(anonClient.ipv4, undefined);
+  await f.storage.drain();
+});
+
+/**
+ * 公开 bootstrap 的响应形状必须与调用方身份无关。
+ *
+ * 这条用例刻意构造**真实有效**的管理员会话，而不是「带上一个坏 cookie」：
+ * 坏 cookie 下 hasAdminSession 恒为 false，新旧实现都会通过，断言没有判别力。
+ * 所以先用同一枚 cookie 打在 /api/live/clients 上做正向对照——它必须真的放行隐藏节点；
+ * 确认放行之后，再断言同一个 include_hidden=1 打在 bootstrap 上什么也不多给。
+ */
+test('AUD-04: an authenticated administrator session does not change the public bootstrap response', async () => {
+  const admin = { uuid: 'admin-fixture', username: 'auditor', session_version: 1 };
+  const f = await fixture({ overrides: {
+    getUserByUuid: async (_database, uuid) => (uuid === admin.uuid ? { ...admin } : null),
+  } });
+  const { generateToken } = f.loader.load('worker/src/auth/jwt.ts');
+  const sessionCookie = `cf_monitor_session=${await generateToken(admin.uuid, admin.username, admin.session_version, f.env)}`;
+  const fetchAs = (route, withSession) => f.app.fetch(new Request(`https://monitor.example.test${route}`, {
+    headers: { 'CF-Connecting-IP': '1.1.1.1', ...(withSession ? { Cookie: sessionCookie } : {}) },
+  }), f.env, f.executionCtx);
+
+  for (const client of [publicClient, hiddenClient]) {
+    const socket = createSocket({ role: 'agent', clientId: client.uuid, clientName: client.name, hidden: client.hidden, sourceIp });
+    f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+    await f.object.webSocketMessage(socket.ws, JSON.stringify({ type: 'report', data: { cpu: 4, timestamp: Date.now(), ipv4: privateV4, ipv6: privateV6 } }));
+  }
+  await f.storage.drain();
+
+  // 正向对照：会话必须真的有效，否则下面的等价性断言是同义反复。
+  const anonymousLive = await (await fetchAs('/api/live/clients?include_hidden=1', false)).json();
+  const administratorLive = await (await fetchAs('/api/live/clients?include_hidden=1', true)).json();
+  assert.ok(!anonymousLive.online.includes(hiddenClient.uuid), 'include_hidden alone must not widen an anonymous live snapshot');
+  assert.ok(administratorLive.online.includes(hiddenClient.uuid), 'the fixture session must actually be accepted, otherwise this test cannot tell the fix from the bug');
+  assertNoRawAddress([anonymousLive, administratorLive], 'live clients');
+
+  // 同一枚有效会话、同一个 include_hidden=1，bootstrap 必须与匿名逐字段一致。
+  // 用 _fresh 强制重算，绕开 publicMetadataResponseCache —— 它的键只看路径（bootstrap 的
+  // 允许参数集为空），命中缓存会让这条断言在任何实现下都通过，从而失去判别力。
+  const anonymous = await (await fetchAs('/api/public/bootstrap?_fresh=1&include_hidden=1', false)).json();
+  const administrator = await (await fetchAs('/api/public/bootstrap?_fresh=1&include_hidden=1', true)).json();
+  assertPublicBytes(anonymous, 'anonymous bootstrap');
+  assertPublicBytes(administrator, 'administrator bootstrap');
+  const shapeOf = body => ({
+    keys: Object.keys(body).sort(),
+    clients: (body.clients || []).map(client => client.uuid),
+    nodes: (body.nodes || []).map(node => node.uuid),
+    online: body.live?.online || [],
+    // 逐节点字段集合也必须一致：泄露往往只表现为「多了几个字段」。
+    liveFields: Object.keys(body.live?.data?.[publicClient.uuid] || {}).sort(),
+  });
+  assert.deepEqual(shapeOf(administrator), shapeOf(anonymous), 'the public bootstrap must not vary with the caller identity');
+  assert.ok(!shapeOf(administrator).clients.includes(hiddenClient.uuid), 'the public bootstrap never carries hidden clients');
+  assert.ok(!shapeOf(administrator).online.includes(hiddenClient.uuid), 'the public bootstrap never carries a hidden live node');
+  // 存在性信息保留，明文地址仍然没有。
+  assert.equal(administrator.live.data[publicClient.uuid].has_ipv4, true);
+  assert.equal(administrator.live.data[publicClient.uuid].ipv4, undefined);
+  assert.equal(administrator.live.data[publicClient.uuid].ipv6, undefined);
   await f.storage.drain();
 });
 

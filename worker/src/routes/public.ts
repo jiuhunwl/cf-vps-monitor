@@ -1395,20 +1395,25 @@ publicRoutes.get('/public', async (c) => {
 });
 
 // 公开首屏 bootstrap：合并设置、节点元数据和最近实时快照，减少冷启动串行请求。
+//
+// 本端点**不接受 include_hidden**：公开首页用不到隐藏节点，因此响应形状与调用方身份
+// 完全无关。历史上它按 `include_hidden=1 && hasAdminSession(c)` 放行隐藏数据，结果是
+// 「只要管理员恰好已登录，公开首页拿到的数据范围就变了」，边界说不清楚，也容易被共享
+// 缓存、日志、代理带出去。管理面板需要的隐藏数据走 /api/live/clients 与 /api/ws/live，
+// 那两条已按管理员鉴权。
 publicRoutes.get('/public/bootstrap', async (c) => {
   const fresh = isFreshPublicMetadataRequest(c);
-  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
-  const cached = !fresh && !includeHidden ? await getCachedPublicMetadataResponse(c, 'bootstrap') : null;
+  const cached = !fresh ? await getCachedPublicMetadataResponse(c, 'bootstrap') : null;
   if (cached) return cached;
   const limited = await guardPublicMetadata(c, 'bootstrap');
   if (limited) return limited;
 
   const [settings, snapshot, live] = await Promise.all([
     getPublicSettings(getDatabase(c.env), fresh),
-    getPublicClientsSnapshot(c, getDatabase(c.env), fresh, includeHidden),
+    getPublicClientsSnapshot(c, getDatabase(c.env), fresh, false),
     c.env.LIVE_DATA
       .get(c.env.LIVE_DATA.idFromName('global'))
-      .fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }))
+      .fetch(new Request('https://do/live', { method: 'GET' }))
       .then(response => readLiveSnapshot(response))
       .then(snapshot => snapshot ?? { online: [], count: 0 }),
   ]);
@@ -1421,7 +1426,7 @@ publicRoutes.get('/public/bootstrap', async (c) => {
     snapshot_at: Date.now(),
     server_time: Date.now(),
   };
-  return includeHidden ? privateJsonResponse(payload) : setPublicMetadataResponse(c, payload, !fresh);
+  return setPublicMetadataResponse(c, payload, !fresh);
 });
 
 // 获取客户端最近的监控记录

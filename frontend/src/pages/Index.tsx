@@ -53,7 +53,11 @@ function mergeLiveClientMetadata(clients: ClientInfo[], liveClients: LiveDataMap
   });
 }
 
-function applyPublicClientUpdate(current: ClientInfo[], detail: PublicDataUpdateDetail | undefined, includeHidden: boolean): ClientInfo[] {
+/**
+ * 首页的节点列表是**严格公开**的：它不随登录态变化。
+ * includeHidden 只留给管理面板（/admin）自己用，首页不再传 true。
+ */
+function applyPublicClientUpdate(current: ClientInfo[], detail: PublicDataUpdateDetail | undefined, includeHidden = false): ClientInfo[] {
   return mergePublicClientPatch(current, detail, { includeHidden });
 }
 
@@ -237,21 +241,23 @@ export default function Index() {
       const request = ++clientsRequest;
       pendingClientUpdates = updates;
       const isCurrent = () => !cancelled && request === clientsRequest;
-      fetchPublicBootstrap({ includeHidden: isAuthenticated })
+      // 公开首屏不再请求隐藏节点：/api/public/bootstrap 不接受 include_hidden，
+      // 首页也用不到它，数据范围因此与是否已登录无关。
+      fetchPublicBootstrap()
         .then(data => {
           if (data.clients !== undefined) return data.clients;
           throw new Error('Bootstrap clients missing');
         })
         .catch((loadError: unknown) => {
           if (!isCurrent()) throw loadError;
-          return fetchWithBootstrapRetry(`/api/clients${isAuthenticated ? '?include_hidden=1' : ''}`)
+          return fetchWithBootstrapRetry('/api/clients')
             .then(res => {
               if (!res.ok) throw new Error(`HTTP ${res.status}`);
               return res.json();
             });
         })
         .then(data => {
-          const clients = normalizePublicClients(data, { includeHidden: isAuthenticated });
+          const clients = normalizePublicClients(data);
           const listPayload = Array.isArray(data) ||
             (Boolean(data) && typeof data === 'object' && Array.isArray((data as { data?: unknown }).data));
           if (listPayload || clients.length > 0) return clients;
@@ -259,7 +265,7 @@ export default function Index() {
         })
         .then(data => {
           if (isCurrent()) {
-            setClients(updates.reduce((clients, update) => applyPublicClientUpdate(clients, update, isAuthenticated), data));
+            setClients(updates.reduce((clients, update) => applyPublicClientUpdate(clients, update), data));
             setClientsError(null);
           }
         })
@@ -284,10 +290,10 @@ export default function Index() {
       loadClients();
     };
     const refreshPublicClients = (detail?: PublicDataUpdateDetail) => {
-      setClients((current) => current === undefined ? undefined : applyPublicClientUpdate(current, detail, isAuthenticated));
+      setClients((current) => current === undefined ? undefined : applyPublicClientUpdate(current, detail));
       if (detail?.clients) {
         // A delta cannot replace the pending full list. Replay it after that
-        // list arrives, including in the authorized view without public caching.
+        // list arrives.
         pendingClientUpdates?.push(detail);
         return;
       }
@@ -295,12 +301,12 @@ export default function Index() {
       const updates: PublicDataUpdateDetail[] = [];
       pendingClientUpdates = updates;
       const isCurrent = () => !cancelled && request === clientsRequest;
-      fetchPublicBootstrap({ cache: 'reload', cacheBust: true, includeHidden: isAuthenticated })
+      fetchPublicBootstrap({ cache: 'reload', cacheBust: true })
         .then(data => {
           if (data.clients === undefined) throw new Error('Bootstrap clients missing');
           if (isCurrent() && data.clients !== undefined) {
             const nextClients = data.clients;
-            setClients(updates.reduce((clients, update) => applyPublicClientUpdate(clients, update, isAuthenticated), nextClients));
+            setClients(updates.reduce((clients, update) => applyPublicClientUpdate(clients, update), nextClients));
             setClientsError(null);
           }
         })
@@ -324,7 +330,7 @@ export default function Index() {
       document.removeEventListener('visibilitychange', loadWhenVisible);
       window.clearInterval(timer);
     };
-  }, [authLoading, monitorMode, isAuthenticated, setClients]);
+  }, [authLoading, monitorMode, setClients]);
 
   useEffect(() => {
     let cancelled = false;

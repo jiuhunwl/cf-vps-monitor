@@ -16,8 +16,14 @@ export interface PublicBootstrapPayload {
   server_time?: number;
 }
 
-/** 在途的 bootstrap 请求，按 include_hidden 分槽；fresh 标记该请求是否以 cacheBust 发起。 */
-const bootstrapInFlight = new Map<string, { promise: Promise<PublicBootstrapPayload>; fresh: boolean }>();
+/**
+ * 在途的 bootstrap 请求（全局单槽，不再按 include_hidden 分槽）。
+ *
+ * `/api/public/bootstrap` 已不接受 include_hidden：公开首屏用不到隐藏节点，响应形状必须
+ * 与调用方身份无关。以前分槽是因为「已登录」会多要一份带隐藏节点的数据，同一个 URL 两种
+ * 形状；现在只有一种形状，一次请求就够。fresh 标记该请求是否以 cacheBust 发起。
+ */
+let bootstrapInFlight: { promise: Promise<PublicBootstrapPayload>; fresh: boolean } | null = null;
 let bootstrapCache: PublicBootstrapPayload | null = null;
 let clientPatchCache: PublicBootstrapClientPatch | null = null;
 const PUBLIC_BOOTSTRAP_STORAGE_KEY = 'cf_monitor_public_bootstrap';
@@ -45,7 +51,11 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function normalizePublicBootstrap(payload: unknown, options: { includeHidden?: boolean } = {}): PublicBootstrapPayload {
+/**
+ * 归一化公开 bootstrap 响应。**没有 includeHidden 参数**：该端点不区分受众，
+ * 恒为公开形状，因此归一化也只有一条路径（隐藏节点一律剔除，并叠加本地乐观补丁）。
+ */
+function normalizePublicBootstrap(payload: unknown): PublicBootstrapPayload {
   const record = asRecord(payload);
   if (!record) throw new Error('Invalid public bootstrap response');
   for (const field of ['clients', 'nodes'] as const) {
@@ -56,14 +66,14 @@ function normalizePublicBootstrap(payload: unknown, options: { includeHidden?: b
   }
   const normalized = {
     settings: record.settings === undefined ? undefined : normalizePublicSettings(record.settings) || undefined,
-    clients: record.clients === undefined ? undefined : normalizePublicClients(record.clients, options),
-    nodes: record.nodes === undefined ? undefined : normalizePublicClients(record.nodes, options),
+    clients: record.clients === undefined ? undefined : normalizePublicClients(record.clients),
+    nodes: record.nodes === undefined ? undefined : normalizePublicClients(record.nodes),
     live: record.live === undefined ? undefined : normalizeLiveDataResponse(record.live),
     metadata_version: typeof record.metadata_version === 'string' ? record.metadata_version : undefined,
     snapshot_at: typeof record.snapshot_at === 'number' && Number.isFinite(record.snapshot_at) ? record.snapshot_at : undefined,
     server_time: typeof record.server_time === 'number' && Number.isFinite(record.server_time) ? record.server_time : undefined,
   };
-  return options.includeHidden ? normalized : applyStoredClientPatch(normalized);
+  return applyStoredClientPatch(normalized);
 }
 
 function readClientPatch(): PublicBootstrapClientPatch | null {
@@ -195,7 +205,7 @@ export function getCachedPublicBootstrap(): PublicBootstrapPayload | null {
 
 export function clearCachedPublicBootstrap(): void {
   bootstrapCache = null;
-  bootstrapInFlight.clear();
+  bootstrapInFlight = null;
   removeLocalStorageItem(PUBLIC_BOOTSTRAP_STORAGE_KEY);
   clearClientPatch();
 }
@@ -214,39 +224,35 @@ export function patchCachedPublicBootstrapClients(detail?: PublicBootstrapClient
   if (cached) savePublicBootstrap(applyStoredClientPatch(cached));
 }
 
-export async function fetchPublicBootstrap(options: { cache?: RequestCache; cacheBust?: boolean; includeHidden?: boolean } = {}): Promise<PublicBootstrapPayload> {
-  const includeHidden = Boolean(options.includeHidden);
+export async function fetchPublicBootstrap(options: { cache?: RequestCache; cacheBust?: boolean } = {}): Promise<PublicBootstrapPayload> {
   const wantsFresh = Boolean(options.cacheBust);
-  const key = includeHidden ? 'hidden' : 'public';
 
   // 并发去重：一次 notifyPublicDataUpdated 会同时唤醒多个订阅者
   // （LiveDataContext 与 Index 都会拉 bootstrap），它们应共用同一次网络请求。
   // 要求新鲜数据的调用方只能复用同样以 cacheBust 发起的在途请求，
   // 否则可能拿到走了缓存的旧响应。
-  const inFlight = bootstrapInFlight.get(key);
-  if (inFlight && (!wantsFresh || inFlight.fresh)) return inFlight.promise;
+  if (bootstrapInFlight && (!wantsFresh || bootstrapInFlight.fresh)) return bootstrapInFlight.promise;
 
   // Fresh server data supersedes earlier optimistic edits. Edits arriving during
   // this request remain available to bridge a response started before that edit.
-  if (wantsFresh && !includeHidden) clearClientPatch();
+  if (wantsFresh) clearClientPatch();
 
   const url = new URL('/api/public/bootstrap', typeof window === 'undefined' ? 'http://localhost' : window.location.origin);
   if (options.cacheBust) url.searchParams.set('_fresh', String(Date.now()));
-  if (includeHidden) url.searchParams.set('include_hidden', '1');
+  // 不再拼 include_hidden：该端点不接受它，公开首屏也不需要隐藏节点。
   const promise: Promise<PublicBootstrapPayload> = fetchWithBootstrapRetry(`${url.pathname}${url.search}`, options.cache ? { cache: options.cache } : undefined)
     .then((res) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     })
     .then((payload) => {
-      const normalized = normalizePublicBootstrap(payload, { includeHidden });
-      return includeHidden || bootstrapInFlight.get(key)?.promise !== promise
-        ? normalized
-        : savePublicBootstrap(normalized);
+      const normalized = normalizePublicBootstrap(payload);
+      // 只有仍是最新的在途请求才写入本地缓存，避免被后发起的请求抢先落盘后又被旧响应覆盖。
+      return bootstrapInFlight?.promise === promise ? savePublicBootstrap(normalized) : normalized;
     })
     .finally(() => {
-      if (bootstrapInFlight.get(key)?.promise === promise) bootstrapInFlight.delete(key);
+      if (bootstrapInFlight?.promise === promise) bootstrapInFlight = null;
     });
-  bootstrapInFlight.set(key, { promise, fresh: wantsFresh });
+  bootstrapInFlight = { promise, fresh: wantsFresh };
   return promise;
 }

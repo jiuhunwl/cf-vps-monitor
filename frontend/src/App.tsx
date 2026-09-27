@@ -65,11 +65,15 @@ function preloadRouteChunks() {
 function LiveDataRoute({
   children,
   enabled = true,
+  admin = false,
 }: {
   children: React.ReactNode;
   enabled?: boolean;
+  admin?: boolean;
 }) {
-  return <LiveDataProvider enabled={enabled} viewer>{children}</LiveDataProvider>;
+  // admin 只应由管理面板路由传 true：它决定是否订阅隐藏节点数据。
+  // 公开路由（含已登录管理员访问首页）一律走公开视图。
+  return <LiveDataProvider enabled={enabled} viewer admin={admin}>{children}</LiveDataProvider>;
 }
 
 function PublicIndexRoute() {
@@ -130,7 +134,7 @@ export default function App() {
                 <Route path="/db-init" element={<DbInit />} />
 
                 <Route path="/admin" element={<AdminLayout />}>
-                  <Route index element={<LiveDataRoute><AdminDashboard /></LiveDataRoute>} />
+                  <Route index element={<LiveDataRoute admin><AdminDashboard /></LiveDataRoute>} />
                   <Route path="clients" element={<Navigate to="/admin" replace />} />
                   <Route path="websites" element={<AdminWebsites />} />
                   <Route path="settings" element={<SettingsLayout />}>
