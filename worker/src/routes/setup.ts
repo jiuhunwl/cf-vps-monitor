@@ -464,11 +464,28 @@ setupRoutes.get('/status', async (c) => {
   }, ok ? 200 : 503);
 });
 
+/**
+ * 匿名访问者不得拿到完整的 Supabase project ref。
+ *
+ * 仓库刻意不公开 Supabase 地址（见 `scripts/deploy-cloudflare.mjs` 里「更新部署复用线上
+ * SUPABASE_URL」的注释、`.gitignore` 里的 `.dev.vars*`），同文件里的 `/status` 也已经
+ * 按「管理员已存在 ⇒ limitedSetupResponse」降级。但 `GET /database/init` 在
+ * `index.ts` 的 `canServeWithoutDatabaseStartup` 白名单里（数据库尚未就绪时也要能打开
+ * 初始化页），所以这里**无法**按「管理员是否已存在」决定分级 —— 只能不下发完整 ref。
+ *
+ * 完整 ref 足以拼出 `https://<ref>.supabase.co`，那正是部署者刻意隐藏的值；
+ * 但操作者需要确认 worker 指向的是哪个项目，所以保留一个掩码提示。
+ */
+function projectRefHint(ref: string | null): string | null {
+  if (!ref) return null;
+  return ref.length <= 6 ? `${ref.slice(0, 1)}…` : `${ref.slice(0, 4)}…${ref.slice(-2)}`;
+}
+
 setupRoutes.get('/database/init', (c) => {
   const projectRef = supabaseProjectRef(c.env);
   return c.json({
     ok: Boolean(projectRef),
-    project_ref: projectRef,
+    project_ref_hint: projectRefHint(projectRef),
     migration_count: BUNDLED_SUPABASE_MIGRATIONS.length,
   }, projectRef ? 200 : 503);
 });
@@ -498,7 +515,9 @@ setupRoutes.post('/database/init', async (c) => {
     const result = await applyBundledMigrations(projectRef, accessToken);
     return c.json({ success: true, project_ref: projectRef, ...result });
   } catch (error) {
-    return c.json({ error: redactSetupInitError(error) }, 500);
+    // 上游（Supabase Management API）的报错文案里是否回显 project ref 属于源码外事实，
+    // 不能假设它不会。这里直接把它从对外文案里抹掉，让这条路径不依赖上游行为。
+    return c.json({ error: redactSetupInitError(error).replaceAll(projectRef, '<project-ref>') }, 500);
   }
 });
 

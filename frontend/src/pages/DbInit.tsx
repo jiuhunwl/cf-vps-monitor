@@ -6,7 +6,12 @@ import { toast } from 'sonner';
 
 type InitInfo = {
   ok: boolean;
-  project_ref?: string | null;
+  /**
+   * 服务端只回掩码提示，不回完整 project ref：这个端点在数据库就绪前就要能跑、
+   * 因此无法按「管理员是否已存在」降级，而完整 ref 足以拼出
+   * `https://<ref>.supabase.co`（部署者刻意隐藏的值）。掩码足以确认指向哪个项目。
+   */
+  project_ref_hint?: string | null;
   migration_count?: number;
 };
 
@@ -86,7 +91,7 @@ export default function DbInit() {
 
         <Flex className="db-init-meta" gap="2" wrap="wrap" mb="4">
           <Badge color={info?.ok ? 'green' : 'red'} variant="soft">
-            项目: {info?.project_ref || '未识别'}
+            项目: {info?.project_ref_hint || '未识别'}
           </Badge>
           <Badge color="gray" variant="soft">
             迁移: {info?.migration_count ?? '-'}
