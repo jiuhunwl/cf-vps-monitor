@@ -7,9 +7,15 @@ export type PublicClient = Omit<PublicClientRow, 'ipv4' | 'ipv6'> & {
   tags: string;
 };
 
-type PublicClientSource = PublicClientRow & {
+type PublicClientSource = Omit<PublicClientRow, 'ipv4' | 'ipv6'> & {
   token?: unknown;
   remark?: unknown;
+  // 数据库层的 cfm_public_clients 已不再下发原始 ipv4/ipv6，只下发预计算的
+  // has_ipv4/has_ipv6，因此这里的原始字段是可缺席的。旧库仍会下发它们。
+  ipv4?: unknown;
+  ipv6?: unknown;
+  has_ipv4?: unknown;
+  has_ipv6?: unknown;
 };
 
 export const PUBLIC_CLIENT_FIELDS = [
@@ -44,13 +50,26 @@ export function sanitizePublicTags(tags: unknown): string {
     .join(';');
 }
 
+/**
+ * 解析「是否存在公网 IP」标记。
+ *
+ * 两条来源必须都支持，否则会静默退化成一律 false：
+ *  - 旧库：下发原始 ipv4/ipv6，由 Worker 现场判定（不能信任库里的值，只认自己算的）
+ *  - 新库：已在下发前剥离原始 IP，只保留预计算的布尔值
+ * 原始字段一旦存在就以现算结果为准，避免上游塞入伪造的标记。
+ */
+function resolveIpPresence(rawIp: unknown, precomputed: unknown): boolean {
+  if (typeof rawIp === 'string') return isPublicIpAddress(rawIp);
+  return precomputed === true;
+}
+
 export function toPublicClient(client: PublicClientSource): PublicClient {
   const { ipv4, ipv6 } = client;
   const publicClient = pickFields(client, PUBLIC_CLIENT_FIELDS);
   return {
     ...publicClient,
-    has_ipv4: typeof ipv4 === 'string' && isPublicIpAddress(ipv4),
-    has_ipv6: typeof ipv6 === 'string' && isPublicIpAddress(ipv6),
+    has_ipv4: resolveIpPresence(ipv4, client.has_ipv4),
+    has_ipv6: resolveIpPresence(ipv6, client.has_ipv6),
     tags: sanitizePublicTags(publicClient.tags),
   };
 }
