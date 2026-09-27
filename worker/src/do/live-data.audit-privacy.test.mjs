@@ -55,6 +55,17 @@ function assertPublicBytes(value, label) {
   }
 }
 
+/**
+ * 管理员受众允许看到隐藏节点名等管理信息，因此不能套用 assertPublicBytes；
+ * 但**明文地址**对任何受众都不允许出现。这是本文件的核心不变量。
+ */
+function assertNoRawAddress(value, label) {
+  const serialized = JSON.stringify(value);
+  for (const address of [sourceIp, privateV4, privateV6]) {
+    assert.ok(!serialized.includes(address), `${label} disclosed the raw address ${address}`);
+  }
+}
+
 test('AUD-02: all anonymous HTTP and WebSocket live outputs apply the public field boundary', async () => {
   const f = await fixture();
   for (const client of [publicClient, hiddenClient]) {
@@ -83,14 +94,22 @@ test('AUD-02: all anonymous HTTP and WebSocket live outputs apply the public fie
     assert.deepEqual(snapshot.online, [publicClient.uuid]);
     assert.equal(snapshot.data[publicClient.uuid].cpu, 4);
   }
+  // 管理员受众（includeHidden=true）收到的 update 与 snapshot 是
+  // /api/public/bootstrap?include_hidden=1 的同一条数据源，此前正是它在放行明文 IP。
+  // 允许出现隐藏节点名（assertPublicBytes 不适用），但不允许出现任何明文地址。
+  assertNoRawAddress(f.viewers[1].messages.filter(message => message.type === 'update'), 'administrator WS update');
+  f.object.sendSnapshot(f.viewers[1].ws);
+  const adminSnapshotMessage = f.viewers[1].messages.at(-1);
+  assert.equal(adminSnapshotMessage?.type, 'snapshot');
+  assertNoRawAddress(adminSnapshotMessage, 'administrator WS snapshot');
+  assert.ok(adminSnapshotMessage.data[hiddenClient.uuid], 'hidden nodes must still reach the administrator');
+  assert.equal(adminSnapshotMessage.data[publicClient.uuid].has_ipv4, true, 'the administrator still learns IP presence');
+
   // 管理员受众同样拿不到明文地址。IP 可见性拆成两件事：
   // 「有没有」用 has_ipv4/has_ipv6 布尔表达，明文只走 /api/clients（cfm_admin_clients），
   // 那是真正按管理员鉴权的通道。这样公开响应形状与调用方身份无关。
   const adminSnapshot = f.object.buildSnapshot(true);
-  const adminBytes = JSON.stringify(adminSnapshot);
-  for (const address of [sourceIp, privateV4, privateV6]) {
-    assert.ok(!adminBytes.includes(address), `administrator snapshot must not disclose the raw address ${address}`);
-  }
+  assertNoRawAddress(adminSnapshot, 'administrator snapshot');
   const adminClient = adminSnapshot.data[publicClient.uuid];
   assert.equal(adminClient.has_ipv4, true, 'the administrator still learns that the node has a public IPv4');
   assert.equal(adminClient.ipv4, undefined, 'raw addresses never leave the DO report projection');
