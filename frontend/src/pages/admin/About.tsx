@@ -3,6 +3,7 @@ import { Flex, Card, Text, Heading, Badge, Grid, Box, Button, TextField, Tabs } 
 import { Activity, Bell, Cloud, Code2, Database, Github, Monitor, ShieldCheck, Server, Zap } from 'lucide-react';
 import { formatAppVersion } from '../../utils/version';
 import { useApi } from '../../contexts/AuthContext';
+import { CF_MONITOR_BRANCH, CF_MONITOR_GITHUB_URL, CF_MONITOR_REPOSITORY } from '../../utils/projectLinks';
 
 interface VersionInfo {
   version: string;
@@ -180,7 +181,7 @@ export default function AdminAbout() {
                     <Badge size="2" variant="soft" color="green">Cloudflare Workers</Badge>
                   </Flex>
                 </Box>
-                <Button variant="soft" onClick={() => openExternal('https://github.com/kadidalax/cf-vps-monitor')} aria-label="GitHub">
+                <Button variant="soft" onClick={() => openExternal(CF_MONITOR_GITHUB_URL)} aria-label="GitHub">
                   <Github size={16} />
                 </Button>
               </Flex>
@@ -262,7 +263,7 @@ export default function AdminAbout() {
                 </Box>
 
                 <Flex align="center" justify="between" gap="3" wrap="wrap" mt="auto">
-                  <Text size="1" color="gray">更新源：kadidalax/cf-vps-monitor/main</Text>
+                  <Text size="1" color="gray">更新源：{CF_MONITOR_REPOSITORY}/{CF_MONITOR_BRANCH}</Text>
                   <Flex align="center" gap="2">
                     {updateSettingsMessage && (
                       <Text size="1" color={updateSettingsMessage === '已保存' ? 'green' : 'red'}>{updateSettingsMessage}</Text>

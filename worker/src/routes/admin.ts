@@ -27,6 +27,7 @@ import {
 import { buildBackupSnapshot } from '../utils/backup-snapshot';
 import { measureRestoredClientSnapshot } from '../utils/restore-client-snapshot';
 import { getCloudflareClientIp } from '../utils/request-ip';
+import { CF_MONITOR_BRANCH, CF_MONITOR_REPOSITORY } from '../utils/project-repository';
 import { validatePingTaskInput } from '../utils/ping-task';
 import { generateAgentToken, validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
 import { validateExpiryNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
@@ -92,8 +93,8 @@ const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
 const ADMIN_SETTINGS_SCOPE_CACHE_MS = 10_000;
 const HEALTH_CACHE_MS = 30_000;
 const ALLOWED_CLIENT_IDS_CACHE_MS = 30_000;
-const OFFICIAL_UPDATE_REPOSITORY = 'kadidalax/cf-vps-monitor';
-const OFFICIAL_UPDATE_BRANCH = 'main';
+const OFFICIAL_UPDATE_REPOSITORY = CF_MONITOR_REPOSITORY;
+const OFFICIAL_UPDATE_BRANCH = CF_MONITOR_BRANCH;
 const UPDATE_CHECK_CACHE_MS = 10 * 60 * 1000;
 const updateCheckCache = new Map<string, { expiresAt: number; value: UpdateCheckResult }>();
 const LIVE_POLICY_SETTING_KEYS = new Set([

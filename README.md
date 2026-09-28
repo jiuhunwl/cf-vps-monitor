@@ -1,4 +1,4 @@
-![Stars](https://img.shields.io/github/stars/kadidalax/cf-vps-monitor?style=for-the-badge&logo=github&label=Stars&color=ffb000) ![Forks](https://img.shields.io/github/forks/kadidalax/cf-vps-monitor?style=for-the-badge&logo=github&label=Forks&color=2ea44f) ![License](https://img.shields.io/github/license/kadidalax/cf-vps-monitor?style=for-the-badge&color=blue)
+![Stars](https://img.shields.io/github/stars/jiuhunwl/cf-vps-monitor?style=for-the-badge&logo=github&label=Stars&color=ffb000) ![Forks](https://img.shields.io/github/forks/jiuhunwl/cf-vps-monitor?style=for-the-badge&logo=github&label=Forks&color=2ea44f) ![License](https://img.shields.io/github/license/jiuhunwl/cf-vps-monitor?style=for-the-badge&color=blue)
 # CF VPS Monitor
 
 CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承载前端、API、实时连接和定时任务，使用 Durable Objects 协调实时状态，使用 Supabase Postgres 保存配置和历史数据，使用 Go Agent 在服务器上采集指标。
@@ -49,12 +49,12 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.8`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
 
-### Fork 原仓库部署【推荐，方便更新】
+### Fork 本仓库部署【推荐，方便更新】
 
 
 1. 在 [Supabase](https://supabase.com/dashboard/) 创建或选择项目。
 2. 打开 Supabase 项目 **Project Overview** 页面复制 `Project URL`；打开 **Project Settings -> API Keys -> Publishable and secret API keys**，复制 **Secret keys** 中的 `default` Secret key，格式通常为 `sb_secret_...`。
-3. Fork [本仓库](https://github.com/kadidalax/cf-vps-monitor)， 创建自己的仓库。到Actions 选择**Agent Release** 点击**Run workflow** 填入创建自己的版本号，再次点击**Run workflow** 创建自己仓库的Agent 安装脚本。
+3. （可选）Fork [本仓库](https://github.com/jiuhunwl/cf-vps-monitor) 得到自己的仓库，便于后续从本仓库同步更新；直接使用本仓库部署也可以。到 Actions 选择 **Agent Release** 点击 **Run workflow** 填入自己的版本号，再次点击 **Run workflow** 生成 Agent 安装脚本。
 4. 打开 Cloudflare Dashboard 的 **Workers & Pages**，点击 **创建应用程序**， 点击**Continue with GitHub**。
 5. 选择 GitHub 账号和刚创建的 Fork 仓库，点击**下一步**。
 6. 展开 **高级设置** 配置三个变量 `SUPABASE_URL`、`SUPABASE_SECRET_KEY`、`JWT_SECRET`。`JWT_SECRET` 必须至少 32 字节，英文/数字不少于 32 个字符。
@@ -68,7 +68,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ### 直接一键部署
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kadidalax/cf-vps-monitor)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jiuhunwl/cf-vps-monitor)
 
 1. 在 [Supabase](https://supabase.com/dashboard/) 创建或选择项目。
 2. 打开 Supabase 项目 **Project Overview** 页面复制 `Project URL`；打开 **Project Settings -> API Keys -> Publishable and secret API keys**，复制 **Secret keys** 中的 `default` Secret key，格式通常为 `sb_secret_...`。
@@ -130,7 +130,7 @@ OpenRC 每次启动会准备服务账户专用日志并检查启动后进程存�
 卸载单个 Unix 实例：
 
 ```bash
-wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/refs/heads/main/agent/install.sh' | sh -s -- --uninstall -i 实例ID
+wget -qO- 'https://raw.githubusercontent.com/jiuhunwl/cf-vps-monitor/refs/heads/main/agent/install.sh' | sh -s -- --uninstall -i 实例ID
 ```
 
 卸载单个 Windows 实例：
@@ -143,7 +143,7 @@ wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/refs/heads
 
 ## 后台一键同步更新
 
-后台固定检测 [kadidalax/cf-vps-monitor](https://github.com/kadidalax/cf-vps-monitor) `main` 分支的最新推送编码。进入后台 `关于 -> 版本更新`，保存“你的部署仓库地址”，以后检测到推送编码不一致时会显示同步入口。
+后台固定检测 [jiuhunwl/cf-vps-monitor](https://github.com/jiuhunwl/cf-vps-monitor) `main` 分支的最新推送编码。进入后台 `关于 -> 版本更新`，保存“你的部署仓库地址”，以后检测到推送编码不一致时会显示同步入口。
 
 ### 从 v2.0.2 升级到 v2.0.3
 
@@ -151,9 +151,9 @@ wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/refs/heads
 2. 原先使用非每月 1 日重置流量的节点，先在后台确认“流量重置日”，再更新 Agent。使用后台为原节点生成的新版安装命令原地更新即可，安装器会重启 Agent，无需重启 VPS。Agent 不会自动更新；由 Agent 执行的网站探测需要新版，旧版仍可上报普通指标和 Ping。
 3. 首次升级 Agent 会重建流量统计基线，累计值可能降低或重新起算；修改流量重置日也会重建当期累计。
 
-### 如果是 Fork 原仓库部署【推荐】
+### 如果是 Fork 本仓库部署【推荐】
 
-适合先 Fork 官方仓库，再在 Cloudflare Workers Builds 里连接这个 Fork 仓库的部署方式。
+适合先 Fork 本仓库，再在 Cloudflare Workers Builds 里连接这个 Fork 仓库的部署方式。
 
 1. 在后台 `关于 -> 版本更新`：
    - `你的部署仓库地址` 填你的 Fork 仓库地址，例如 `https://github.com/用户名/cf-vps-monitor`
@@ -167,7 +167,7 @@ wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/refs/heads
 
 ### 如果是 Deploy Button 一键部署
 
-Cloudflare 一键部署自动创建的仓库不保证包含可用的更新工作流，后台不再提供这类更新入口。需要后续稳定同步更新时，建议改用上面的 Fork 原仓库部署方式。
+Cloudflare 一键部署自动创建的仓库不保证包含可用的更新工作流，后台不再提供这类更新入口。需要后续稳定同步更新时，建议改用上面的 Fork 本仓库部署方式。
 
 
 ## 本地开发
@@ -200,6 +200,10 @@ cd agent && go test ./...
 
 本项目使用 [MIT License](LICENSE)。
 
+### 溯源说明
+
+本项目源自 MIT 许可的 **CF VPS Monitor** 项目。原上游仓库已不可访问（HTTP 404），本仓库现作为独立项目继续维护：所有安装脚本、Worker 重定向、后台更新源与文档均以本仓库为准。MIT 许可允许在保留原始版权声明的前提下继续分发，`LICENSE` 正文中的版权声明予以保留。
+
 ## 参考文档
 
 - [Cloudflare Deploy to Cloudflare buttons](https://developers.cloudflare.com/workers/platform/deploy-buttons/)
@@ -215,10 +219,10 @@ cd agent && go test ./...
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=kadidalax%2Fcf-vps-monitor&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=jiuhunwl%2Fcf-vps-monitor&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=jiuhunwl/cf-vps-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=jiuhunwl/cf-vps-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=jiuhunwl/cf-vps-monitor&type=date&legend=top-left" />
  </picture>
 </a>

@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { APP_VERSION } from './utils/app-version';
 import { shortGitSha } from './utils/update-check';
+import { CF_MONITOR_RAW_BASE } from './utils/project-repository';
 
 // 路由模块
 import { publicRoutes } from './routes/public';
@@ -310,9 +311,10 @@ app.use('/api/*', async (c, next) => {
   return undefined;
 });
 
-app.get('/agent/install.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install.sh', 302));
-app.get('/agent/install-linux.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-linux.sh', 302));
-app.get('/agent/install-windows.ps1', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-windows.ps1', 302));
+// 从统一常量派生，避免同一仓库标识在多个路由里各写一份字面量。
+app.get('/agent/install.sh', (c) => c.redirect(`${CF_MONITOR_RAW_BASE}/agent/install.sh`, 302));
+app.get('/agent/install-linux.sh', (c) => c.redirect(`${CF_MONITOR_RAW_BASE}/agent/install-linux.sh`, 302));
+app.get('/agent/install-windows.ps1', (c) => c.redirect(`${CF_MONITOR_RAW_BASE}/agent/install-windows.ps1`, 302));
 
 // 公开 API，无认证
 app.route('/api/setup', setupRoutes);

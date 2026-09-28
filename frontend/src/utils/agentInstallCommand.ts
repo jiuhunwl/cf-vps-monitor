@@ -1,4 +1,4 @@
-import { CF_MONITOR_REPOSITORY } from './projectLinks';
+import { CF_MONITOR_BRANCH, CF_MONITOR_REPOSITORY } from './projectLinks';
 
 export type AgentInstallPlatform = 'unix' | 'windows';
 
@@ -36,7 +36,8 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
   nicExclude: '',
 };
 
-export const CF_MONITOR_BRANCH = 'main';
+// 分支与仓库标识的权威定义在 projectLinks.ts，这里只转出以兼容既有引用。
+export { CF_MONITOR_BRANCH };
 export const CF_MONITOR_AGENT_SCRIPT_REF = `refs/heads/${CF_MONITOR_BRANCH}`;
 export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download`;
 export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/${CF_MONITOR_AGENT_SCRIPT_REF}/agent`;
