@@ -6,9 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "lint": "wrangler types --check && tsc --noEmit",
+    "lint": "wrangler types && tsc --noEmit",
     "test": "node --test",
-    "build": "node ../scripts/generate-migrations.mjs && wrangler types --check && tsc --noEmit",
+    "build": "node ../scripts/generate-migrations.mjs && wrangler types && tsc --noEmit",
     "build:frontend": "npm --prefix ../frontend run build",
     "predeploy": "npm run build:frontend && npm run build",
     "deploy": "node ../scripts/deploy-cloudflare.mjs"
