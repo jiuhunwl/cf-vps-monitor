@@ -54,15 +54,18 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 1. 在 [Supabase](https://supabase.com/dashboard/) 创建或选择项目。
 2. 打开 Supabase 项目 **Project Overview** 页面复制 `Project URL`；打开 **Project Settings -> API Keys -> Publishable and secret API keys**，复制 **Secret keys** 中的 `default` Secret key，格式通常为 `sb_secret_...`。
-3. （可选）Fork [本仓库](https://github.com/jiuhunwl/cf-vps-monitor) 得到自己的仓库，便于后续从本仓库同步更新；直接使用本仓库部署也可以。到 Actions 选择 **Agent Release** 点击 **Run workflow** 填入自己的版本号，再次点击 **Run workflow** 生成 Agent 安装脚本。
-4. 打开 Cloudflare Dashboard 的 **Workers & Pages**，点击 **创建应用程序**， 点击**Continue with GitHub**。
-5. 选择 GitHub 账号和刚创建的 Fork 仓库，点击**下一步**。
-6. 展开 **高级设置** 配置三个变量 `SUPABASE_URL`、`SUPABASE_SECRET_KEY`、`JWT_SECRET`。`JWT_SECRET` 必须至少 32 字节，英文/数字不少于 32 个字符。
-7. 保持默认 **构建命令** `npm run build`，将 **部署命令** 设置为 `npm run deploy`。
-8. 点击 **部署**。
-9. 如果 Cloudflare 里创建的 Worker 名称不是 `cf-vps-monitor`，需要同步修改 Fork 仓库的 `wrangler.toml` 里的 `name`，两者必须一致。
-10. 去 [Supabase](https://supabase.com/dashboard/account/tokens) 创建有效期 1 小时的 Access Token。
-11. 打开 `https://你的 Worker 域名/db-init` 初始化数据库，首次部署后访问 `/admin/login` 创建管理员。
+3. Fork [本仓库](https://github.com/jiuhunwl/cf-vps-monitor) 得到自己的仓库。Cloudflare 只能连接你本人有权限的仓库，因此这一步不能省略。
+4. **在你自己的 Fork 仓库里**打开 Actions，选择 **Agent Release**，点击 **Run workflow** 填入一个版本号（例如 `v1.1.0`），再点一次 **Run workflow**。该 workflow 会先跑一遍 CI，通过后再编译各平台 Agent 并发布 release。仓库已有的 release 不会被复用，版本号必须比历史版本更新。
+   - 后台生成的安装命令默认从 `releases/latest/download` 取二进制、从源码分支取安装脚本，因此**必须至少发布过一个 release**，否则 Agent 安装会 404。
+   - 如果你在后台给节点填了 `release-tag`，安装脚本会改为从该 tag 的 release 资产里取，这时更要保证对应版本已发布。
+5. 打开 Cloudflare Dashboard 的 **Workers & Pages**，点击 **创建应用程序**， 点击**Continue with GitHub**。
+6. 选择 GitHub 账号和刚创建的 Fork 仓库，点击**下一步**。
+7. 展开 **高级设置** 配置三个变量 `SUPABASE_URL`、`SUPABASE_SECRET_KEY`、`JWT_SECRET`。`JWT_SECRET` 必须至少 32 字节，英文/数字不少于 32 个字符。
+8. 保持默认 **构建命令** `npm run build`，将 **部署命令** 设置为 `npm run deploy`。
+9. 点击 **部署**。
+10. 如果 Cloudflare 里创建的 Worker 名称不是 `cf-vps-monitor`，需要同步修改 Fork 仓库的 `wrangler.toml` 里的 `name`，两者必须一致。
+11. 去 [Supabase](https://supabase.com/dashboard/account/tokens) 创建有效期 1 小时的 Access Token。
+12. 打开 `https://你的 Worker 域名/db-init` 初始化数据库，首次部署后访问 `/admin/login` 创建管理员。
 
 
 
@@ -102,7 +105,7 @@ npm run deploy
 
 1. 登录后台。
 2. 在“服务器”添加节点。
-3. 打开节点安装命令，选择 Unix 自动检测或 Windows。复制安装命令。请确认你的安装脚本指向的仓库有效且你已经在actions里运行了创建agent脚本的workflow。
+3. 打开节点安装命令，选择 Unix 自动检测或 Windows，复制安装命令。安装命令里的脚本地址来自源码分支、二进制来自 release；如果你部署的是自己的 Fork，请先确认该 Fork 里已经跑过 **Agent Release** 且存在 release，否则二进制会 404。
 4. 在 VPS 上执行安装命令，等待 Agent 上线。
 5. 需要 Ping 监控时，在“Ping”创建任务。
 6. 需要网站监控时，在“网站”创建 HTTP/HTTPS 或 TCP 检测目标。
@@ -144,6 +147,8 @@ wget -qO- 'https://raw.githubusercontent.com/jiuhunwl/cf-vps-monitor/refs/heads/
 ## 后台一键同步更新
 
 后台固定检测 [jiuhunwl/cf-vps-monitor](https://github.com/jiuhunwl/cf-vps-monitor) `main` 分支的最新推送编码。进入后台 `关于 -> 版本更新`，保存“你的部署仓库地址”，以后检测到推送编码不一致时会显示同步入口。
+
+> **从旧上游迁移过来的部署**：如果你此前把 `你的部署仓库地址` 填的是旧上游地址，请改成上面的本仓库地址（或你自己的 Fork）。旧上游已归档、不会再产生新提交，继续对着它做对比会一直显示“已是最新”。
 
 ### 从 v2.0.2 升级到 v2.0.3
 
@@ -196,13 +201,26 @@ cd agent && go test ./...
 - Supabase 迁移启用 RLS，并对 RPC 函数显式 `revoke` / `grant`；需要 `security definer` 的函数固定 `search_path`。
 - 忘记密码重置需要输入当前部署的 Supabase Secret key；该 key 只用于本次请求校验，不会被保存。
 
+## 贡献与反馈
+
+- **问题反馈 / 功能建议**：请在本仓库 [Issues](https://github.com/jiuhunwl/cf-vps-monitor/issues) 提交，尽量写清部署方式（Fork / Deploy Button / 命令行）、Worker 版本和可复现步骤。
+- **提交代码**：从 `main` 开分支，提交前至少跑通 `npm run verify`（前端类型检查 + 构建 + `node --test` + Go 测试 + 安全扫描）。若改到仓库标识、安装脚本或发布流程，请再确认 `node agent/install-branch-consistency.test.mjs` 与 `node agent/repository-identity.test.mjs` 仍然通过。
+- **仓库标识改动须知**：`owner/repo` 与默认分支在三处各存一份（三个安装脚本、前端 `frontend/src/utils/projectLinks.ts`、worker `worker/src/utils/project-repository.ts`），必须同步修改；只改一处会让后台安装命令、worker 的 `/agent/install*` 302 重定向与 `/update-check` 更新源指向不同仓库。
+- **安全漏洞**：请不要开公开 Issue，更不要在 Issue 里给出可利用细节。
+
 ## 许可证
 
 本项目使用 [MIT License](LICENSE)。
 
 ### 溯源说明
 
-本项目源自 MIT 许可的 **CF VPS Monitor** 项目。原上游仓库已不可访问（HTTP 404），本仓库现作为独立项目继续维护：所有安装脚本、Worker 重定向、后台更新源与文档均以本仓库为准。MIT 许可允许在保留原始版权声明的前提下继续分发，`LICENSE` 正文中的版权声明予以保留。
+<!-- upstream-attribution:begin -->
+本项目源自 MIT 许可的 **CF VPS Monitor** 项目。原上游仓库 `kadidalax/cf-vps-monitor` 已 **归档（archived，只读）** 且不再维护，无法再接收更新或合入 PR，本仓库因此作为独立项目继续维护：所有安装脚本、Worker 重定向、后台更新源与文档均以本仓库为准。MIT 许可允许在保留原始版权声明的前提下继续分发，`LICENSE` 正文中的版权声明予以保留。
+<!-- upstream-attribution:end -->
+
+上面这段由 `agent/repository-identity.test.mjs` 的溯源标记例外覆盖：该测试会全量扫描被跟踪文件、禁止出现已归档上游的标识，只允许这段标记区间内的溯源说明提及它。
+
+关于 GitHub 的 "forked from" 标记：GitHub 不提供自助解除 fork 关系的能力，该标记保留不影响本仓库作为独立项目运行，也不会限制发布、Issues、Actions 或仓库设置。**维护者注意**：不要在本仓库点击 `Sync fork`，那会把本仓库拉回已归档的上游状态；本仓库的更新只接受来自本地开发的提交。
 
 ## 参考文档
 

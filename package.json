@@ -2,6 +2,14 @@
   "name": "cf-vps-monitor-monorepo",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiuhunwl/cf-vps-monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jiuhunwl/cf-vps-monitor/issues"
+  },
+  "homepage": "https://github.com/jiuhunwl/cf-vps-monitor#readme",
   "type": "module",
   "workspaces": [
     "frontend",
