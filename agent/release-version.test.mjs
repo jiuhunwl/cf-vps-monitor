@@ -103,8 +103,8 @@ test('R-A09 every publishable version resolves through all three real installers
       assert.ifError(result.error);
       if ((result.status === 0) !== vector.pin) failures.push(`${name}: expected ${vector.pin ? 'accept' : 'reject'}, exit=${result.status}, ${result.stdout}${result.stderr}`);
       if (vector.pin && result.status === 0) {
-        const expected = vector.tag ? `https://github.com/kadidalax/cf-vps-monitor/releases/download/${encodeURIComponent(vector.tag)}`
-          : 'https://github.com/kadidalax/cf-vps-monitor/releases/latest/download';
+        const expected = vector.tag ? `https://github.com/jiuhunwl/cf-vps-monitor/releases/download/${encodeURIComponent(vector.tag)}`
+          : 'https://github.com/jiuhunwl/cf-vps-monitor/releases/latest/download';
         if (result.stdout.trim() !== expected) failures.push(`${name}: decoded/encoded repository+tag path is not equivalent: ${result.stdout}`);
       }
     }
