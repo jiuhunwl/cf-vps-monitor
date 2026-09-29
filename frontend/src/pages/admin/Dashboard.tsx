@@ -21,7 +21,7 @@ import {
 } from '@radix-ui/themes';
 import {
   Plus, Pencil, Trash2, Copy, Search,
-  Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound
+  Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound, ArrowUpCircle
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
@@ -31,6 +31,7 @@ import Flag from '../../components/Flag';
 import PriceTags from '../../components/PriceTags';
 import { BillingCycleSelect, CurrencySymbols, ExpiryDateInput } from '../../components/admin/BillingControls';
 import { TrafficLimitEditor } from '../../components/admin/TrafficLimitEditor';
+import AgentUpgradeDialog from '../../components/admin/AgentUpgradeDialog';
 import { formatBytes } from '../../utils/format';
 import { isValidDisplayPrice, toDateInputValue } from '../../utils/billing';
 import {
@@ -47,6 +48,12 @@ import {
   defaultAgentInstallOptions,
   normalizeServerUrl,
 } from '../../utils/agentInstallCommand';
+import {
+  countUpgradableTargets,
+  fetchUpgradeRelease,
+  isAgentUpToDate,
+  normalizeAgentVersion,
+} from '../../utils/agentUpgrade';
 import {
   AdminSortKey,
   getNodeGroups,
@@ -156,6 +163,8 @@ interface SortableRowProps {
   onDelete: (client: AdminClient) => void;
   onCmd: (client: CommandClient) => void;
   onRotateToken: (client: AdminClient) => void;
+  onUpgrade: (client: AdminClient) => void;
+  agentLatestVersion: string | null;
   dragDisabled?: boolean;
 }
 
@@ -201,35 +210,33 @@ function RowActionButton({
   color,
   onClick,
   children,
+  disabled,
 }: {
   label: string;
   color?: 'red';
   onClick: () => void;
   children: React.ReactNode;
+  disabled?: boolean;
 }) {
+  const button = (
+    <IconButton
+      aria-label={label}
+      className={`admin-row-action${color === 'red' ? ' admin-row-action-danger' : ''}`}
+      size="2"
+      variant="soft"
+      color={color}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </IconButton>
+  );
   return (
     <Tooltip content={label}>
-      <IconButton
-        aria-label={label}
-        className={`admin-row-action${color === 'red' ? ' admin-row-action-danger' : ''}`}
-        size="2"
-        variant="soft"
-        color={color}
-        onClick={onClick}
-      >
-        {children}
-      </IconButton>
+      {/* 禁用态原生按钮不触发指针事件，用 span 承载 Tooltip 以保留说明文案 */}
+      {disabled ? <span className="admin-row-action-disabled">{button}</span> : button}
     </Tooltip>
   );
-}
-
-function normalizeAgentVersion(version?: string) {
-  const value = version?.trim();
-  if (!value) return '';
-  const semver = value.match(/v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?/i)?.[0];
-  if (semver) return /^v/i.test(semver) ? semver : `v${semver}`;
-  if (/^v/i.test(value) || !/^\d/.test(value)) return value;
-  return `v${value}`;
 }
 
 function compactOsLabel(os?: string) {
@@ -267,9 +274,16 @@ function formatDetailTime(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN') : '-';
 }
 
-function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit, onDelete, onCmd, onRotateToken, dragDisabled }: SortableRowProps) {
+function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit, onDelete, onCmd, onRotateToken, onUpgrade, agentLatestVersion, dragDisabled }: SortableRowProps) {
   const isOnline = liveData.online.includes(node.uuid);
   const agentVersion = normalizeAgentVersion(node.version) || '-';
+  const latestVersion = normalizeAgentVersion(agentLatestVersion);
+  const upgradeUpToDate = isAgentUpToDate(node.version, agentLatestVersion);
+  const upgradeLabel = upgradeUpToDate
+    ? `已是最新版本 ${latestVersion}`
+    : latestVersion
+      ? `升级：当前 ${agentVersion} → 最新 ${latestVersion}`
+      : '升级到最新版本';
   const systemVersion = formatSystemVersion(node);
   const fullVersionTitle = [
     `客户端版本: ${node.version || '-'}`,
@@ -332,6 +346,7 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
           <Flex className="admin-row-actions">
             <RowActionButton label="编辑" onClick={() => onEdit(node)}><Pencil size={13} /></RowActionButton>
             <RowActionButton label="安装命令" onClick={() => onCmd(node)}><Download size={13} /></RowActionButton>
+            <RowActionButton label={upgradeLabel} disabled={upgradeUpToDate} onClick={() => onUpgrade(node)}><ArrowUpCircle size={13} /></RowActionButton>
             <RowActionButton label="重置 Token" onClick={() => onRotateToken(node)}><KeyRound size={13} /></RowActionButton>
             <RowActionButton label="删除" color="red" onClick={() => onDelete(node)}><Trash2 size={13} /></RowActionButton>
           </Flex>
@@ -903,6 +918,9 @@ export default function AdminDashboard() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [cmdClient, setCmdClient] = useState<CommandClient | null>(null);
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [agentLatestVersion, setAgentLatestVersion] = useState<string | null>(null);
+  const [upgradeNodes, setUpgradeNodes] = useState<AdminClient[]>([]);
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
 
   const liveData: LiveDataMap = useMemo(() => normalizeLiveData(rawLiveData), [rawLiveData]);
   const sensors = useSensors(
@@ -1033,6 +1051,18 @@ export default function AdminDashboard() {
     };
   }, [loadClients, updateClients]);
 
+  const loadAgentRelease = useCallback(async () => {
+    try {
+      const release = await fetchUpgradeRelease(apiFetch);
+      setAgentLatestVersion(release.latest_version);
+    } catch {
+      // 获取失败不阻塞面板；升级入口会退化为「升级到最新版本」并在弹窗内重试获取。
+      setAgentLatestVersion(null);
+    }
+  }, [apiFetch]);
+
+  useEffect(() => { void loadAgentRelease(); }, [loadAgentRelease]);
+
   const groups = useMemo(() => getNodeGroups(clients), [clients]);
 
   const handleDragEnd = async (event: DragEndEvent) => {
@@ -1079,6 +1109,25 @@ export default function AdminDashboard() {
   }, [filtered, selectedNodes]);
 
   const allFilteredSelected = filtered.length > 0 && selectedVisibleCount === filtered.length;
+
+  // 「选中项中有多少是需要升级的」——已最新的会被弹窗列为「跳过」，此处用于按钮提示与置灰。
+  const selectedClients = useMemo(() => {
+    const selectedSet = new Set(selectedNodes);
+    return clients.filter((client) => selectedSet.has(client.uuid));
+  }, [clients, selectedNodes]);
+  const upgradableSelectedCount = useMemo(
+    () => countUpgradableTargets(selectedClients, agentLatestVersion),
+    [selectedClients, agentLatestVersion],
+  );
+  const batchUpgradeDisabled = agentLatestVersion !== null && upgradableSelectedCount === 0;
+
+  const openUpgradeForNodes = useCallback((uuids: string[]) => {
+    const target = new Set(uuids);
+    const list = clients.filter((client) => target.has(client.uuid));
+    if (list.length === 0) return;
+    setUpgradeNodes(list);
+    setUpgradeOpen(true);
+  }, [clients]);
   const overviewCards = useMemo(() => {
     const onlineCount = clients.filter((client) => liveData.online.includes(client.uuid)).length;
     const hiddenCount = clients.filter((client) => client.hidden).length;
@@ -1159,7 +1208,7 @@ export default function AdminDashboard() {
               <TextField.Root className="admin-server-search" size="1" placeholder="查找服务器" value={search} onChange={e => setSearch(e.target.value)}>
                 <TextField.Slot><Search size={14} /></TextField.Slot>
               </TextField.Root>
-              <IconButton className="admin-refresh-button" variant="soft" size="1" onClick={() => { loadClients(true); refreshLive(); }} title="刷新"><RefreshCw size={14} /></IconButton>
+              <IconButton className="admin-refresh-button" variant="soft" size="1" onClick={() => { loadClients(true); refreshLive(); loadAgentRelease(); }} title="刷新"><RefreshCw size={14} /></IconButton>
             </Flex>
 
             {selectedNodes.length > 0 && (
@@ -1174,6 +1223,13 @@ export default function AdminDashboard() {
                 <Button variant="soft" size="1" onClick={batchHideNodes}>
                   <EyeOff size={14} /> 隐藏
                 </Button>
+                <Tooltip content={agentLatestVersion
+                  ? `其中 ${upgradableSelectedCount} 个需要升级，${selectedNodes.length - upgradableSelectedCount} 个已是最新`
+                  : `升级选中的 ${selectedNodes.length} 个节点`}>
+                  <Button variant="soft" size="1" disabled={batchUpgradeDisabled} onClick={() => openUpgradeForNodes(selectedNodes)}>
+                    <ArrowUpCircle size={14} /> 批量升级({selectedNodes.length})
+                  </Button>
+                </Tooltip>
                 <Button variant="ghost" size="1" onClick={() => setSelectedNodes([])}>清除</Button>
               </Flex>
             )}
@@ -1230,6 +1286,8 @@ export default function AdminDashboard() {
                     onDelete={(c) => { setDeleteClient(c); setDeleteOpen(true); }}
                     onCmd={(c) => { setCmdClient(c); setCmdOpen(true); }}
                     onRotateToken={(c) => { setRotateTokenClient(c); setRotateTokenOpen(true); }}
+                    onUpgrade={(c) => openUpgradeForNodes([c.uuid])}
+                    agentLatestVersion={agentLatestVersion}
                   />
                 ))}
               </div>
@@ -1290,6 +1348,14 @@ export default function AdminDashboard() {
       }} />
       {detailClient && <DetailDialog client={detailClient} open={detailOpen} onOpenChange={setDetailOpen} />}
       {cmdClient && <GenerateCommandDialog client={cmdClient} open={cmdOpen} onOpenChange={setCmdOpen} />}
+      <AgentUpgradeDialog
+        open={upgradeOpen}
+        onOpenChange={setUpgradeOpen}
+        nodes={upgradeNodes}
+        targetVersion={agentLatestVersion}
+        onResolvedTarget={(version) => { if (version) setAgentLatestVersion(version); }}
+        onFinished={() => { void loadClients(true); }}
+      />
     </Flex>
   );
 }
