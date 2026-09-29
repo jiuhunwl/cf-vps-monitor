@@ -21,8 +21,17 @@ AUTO_BINARY_URL="0"
 DRY_RUN="0"
 UNINSTALL="0"
 UNINSTALL_ALL="0"
+UPGRADE="0"
 YES="0"
 KEEP_FILES="0"
+NODE_NAME_SET="0"
+MODE_SET="0"
+TRAFFIC_RESET_DAY_SET="0"
+UPGRADE_SUPERVISOR_ENABLED="0"
+UPGRADE_SUPERVISOR_BLOCKED="0"
+UPGRADE_SERVICE_NAME=""
+UPGRADE_SERVICE_FILE=""
+UPGRADE_PATH_FILE=""
 INSTALL_GHPROXY=""
 PROXY=""
 CF_MONITOR_REPOSITORY="jiuhunwl/cf-vps-monitor"
@@ -82,6 +91,7 @@ Options:
   --ignore-unsafe-cert      Accepted as a legacy no-op option.
   --install-ghproxy URL     Accepted as a legacy no-op option.
   --dry-run                 Print actions without changing the system.
+  --upgrade                 Upgrade an existing installation, reusing its saved configuration.
   --uninstall               Stop and remove the systemd service and env file.
   --uninstall-all           Stop all cf-vps-monitor-agent* services and remove all installed agent files.
   --yes                     Confirm destructive --uninstall-all.
@@ -907,6 +917,261 @@ CF_AGENT_SAFETY
 }
 eval "$(agent_safety_helpers)"
 
+# ==================== Root upgrade supervisor ====================
+# Identical in spirit to install.sh: a root helper performs the privileged half
+# of an Agent self-upgrade. The non-root Agent only writes the request file.
+agent_upgrade_service_paths() {
+  UPGRADE_SERVICE_NAME="$SERVICE_NAME-upgrade"
+  UPGRADE_SERVICE_FILE=''
+  UPGRADE_PATH_FILE=''
+  case "$SERVICE_MODE" in
+    systemd)
+      UPGRADE_SERVICE_FILE="${UNIT_FILE%.service}-upgrade.service"
+      UPGRADE_PATH_FILE="${UNIT_FILE%.service}-upgrade.path" ;;
+    openrc)
+      UPGRADE_SERVICE_FILE="${INIT_FILE:-}-upgrade" ;;
+  esac
+}
+
+agent_upgrade_marker_owned() {
+  upgrade_marker_file="$1"
+  [ -f "$upgrade_marker_file" ] && [ ! -L "$upgrade_marker_file" ] &&
+    [ "$(stat -c %h "$upgrade_marker_file")" = 1 ] &&
+    grep -Fqx '# cf-vps-monitor-upgrade:1' "$upgrade_marker_file" &&
+    grep -Fqx "# service: $SERVICE_NAME" "$upgrade_marker_file" &&
+    grep -Fqx "# install: $INSTALL_DIR" "$upgrade_marker_file"
+}
+
+agent_upgrade_service_owned() {
+  [ -n "$UPGRADE_SERVICE_FILE" ] && agent_root_path_safe "$UPGRADE_SERVICE_FILE" &&
+    agent_upgrade_marker_owned "$UPGRADE_SERVICE_FILE"
+}
+
+agent_upgrade_path_owned() {
+  [ -n "$UPGRADE_PATH_FILE" ] && agent_root_path_safe "$UPGRADE_PATH_FILE" &&
+    agent_upgrade_marker_owned "$UPGRADE_PATH_FILE"
+}
+
+# agent_upgrade_origin_args 把安装期配置的下载来源固化进 root 升级辅助单元的
+# 参数。
+#
+# 为什么必须走 argv 而不是请求文件：upgrade-request.json 落在 $STATE_DIR，而该
+# 目录被 chown 给非 root 的 Agent 用户（见 install_systemd 的 chown -R），所以
+# 请求内容由非特权方掌控。若允许请求指定下载来源，攻击者可让 release_base 指向
+# 自己控制的主机，同时提供恶意二进制与与之匹配的 SHA256SUMS —— 此时 SHA256 校验
+# 形同虚设（来源与校验值同源）——而替换后的二进制会被 root 身份的磁盘采集器
+# （User=root + --disk-usage-collector）执行。只认 argv 才能堵住这条提权路径。
+agent_upgrade_origin_args() {
+  quote_fn="$1"
+  args=""
+  if [ -n "${BINARY_BASE_URL:-}" ]; then
+    args="$args --release-base $($quote_fn "$BINARY_BASE_URL")"
+  fi
+  if [ -n "${PROXY:-}" ]; then
+    args="$args --proxy $($quote_fn "$PROXY")"
+  fi
+  if [ -n "${INSTALL_GHPROXY:-}" ]; then
+    args="$args --install-ghproxy $($quote_fn "$INSTALL_GHPROXY")"
+  fi
+  printf '%s' "$args"
+}
+
+agent_upgrade_systemd_service_content() {
+  cat <<EOF
+[Unit]
+Description=CF VPS Monitor Agent Upgrade
+# cf-vps-monitor-upgrade:1
+# service: $SERVICE_NAME
+# install: $INSTALL_DIR
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=$(systemd_exec "$INSTALL_DIR/cf-vps-monitor-agent") --upgrade-supervisor --once --service-name $(systemd_word "$SERVICE_NAME") --install-dir $(systemd_word "$INSTALL_DIR") --state-dir $(systemd_word "$STATE_DIR") --mode systemd --health-timeout 60$(agent_upgrade_origin_args systemd_word)
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+agent_upgrade_systemd_path_content() {
+  cat <<EOF
+[Unit]
+Description=CF VPS Monitor Agent Upgrade Trigger
+# cf-vps-monitor-upgrade:1
+# service: $SERVICE_NAME
+# install: $INSTALL_DIR
+
+[Path]
+PathExists=$(systemd_path "$STATE_DIR/upgrade-request.json")
+Unit=$UPGRADE_SERVICE_NAME.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+agent_upgrade_openrc_content() {
+  cat <<EOF
+#!/sbin/openrc-run
+# cf-vps-monitor-upgrade:1
+# service: $SERVICE_NAME
+# install: $INSTALL_DIR
+name="CF VPS Monitor Agent Upgrade"
+description="Root upgrade supervisor for the CF VPS Monitor Agent"
+command=$(shell_quote "$INSTALL_DIR/cf-vps-monitor-agent")
+command_args=$(shell_quote "--upgrade-supervisor --service-name $(shell_quote "$SERVICE_NAME") --install-dir $(shell_quote "$INSTALL_DIR") --state-dir $(shell_quote "$STATE_DIR") --mode openrc --health-timeout 60$(agent_upgrade_origin_args shell_quote)")
+command_user="root:root"
+command_background=true
+start_stop_daemon_args="--wait 1000"
+pidfile="/run/\${RC_SVCNAME}.pid"
+
+depend() {
+  need net
+}
+EOF
+}
+
+agent_prepare_upgrade_supervisor() {
+  UPGRADE_SUPERVISOR_ENABLED=0
+  agent_upgrade_service_paths
+  [ -n "$UPGRADE_SERVICE_FILE" ] && [ "${OS_NAME:-${PLATFORM_OS:-}}" = linux ] && [ "$(id -u)" = 0 ] || return 0
+  [ "${UPGRADE_SUPERVISOR_BLOCKED:-0}" = 0 ] || return 0
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '%s\n' '[dry-run] install the root upgrade supervisor and its trigger unit'
+    return 0
+  fi
+  case "$SERVICE_MODE" in
+    systemd) [ -d /run/systemd/system ] && [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] || return 0 ;;
+    openrc) [ -x /sbin/openrc-run ] && [ -f /run/openrc/softlevel ] || return 0 ;;
+  esac
+  if ! agent_root_path_safe "$INSTALL_DIR/cf-vps-monitor-agent" ||
+    [ ! -f "$INSTALL_DIR/cf-vps-monitor-agent" ] || [ "$(stat -c %h "$INSTALL_DIR/cf-vps-monitor-agent")" != 1 ]; then
+    printf '%s\n' 'Upgrade supervisor disabled: the Agent binary and every parent directory must be root-owned and not writable by ordinary users.' >&2
+    return 0
+  fi
+  if ! agent_root_path_safe "$(dirname "$UPGRADE_SERVICE_FILE")"; then
+    printf '%s\n' 'Upgrade supervisor disabled: unsafe service directory.' >&2
+    return 0
+  fi
+  if ! env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$INSTALL_DIR/cf-vps-monitor-agent" --version >/dev/null 2>&1; then
+    printf '%s\n' 'Upgrade supervisor disabled: the installed Agent does not support --version.' >&2
+    return 0
+  fi
+  case "$SERVICE_MODE" in
+    systemd)
+      write_file "$UPGRADE_SERVICE_FILE" 644 "$(agent_upgrade_systemd_service_content)" || return 1
+      write_file "$UPGRADE_PATH_FILE" 644 "$(agent_upgrade_systemd_path_content)" || return 1 ;;
+    openrc) write_file "$UPGRADE_SERVICE_FILE" 755 "$(agent_upgrade_openrc_content)" || return 1 ;;
+  esac
+  UPGRADE_SUPERVISOR_ENABLED=1
+}
+
+agent_start_upgrade_supervisor() {
+  [ "${UPGRADE_SUPERVISOR_ENABLED:-0}" = 1 ] || return 0
+  case "$SERVICE_MODE" in
+    systemd)
+      if run systemctl enable "$UPGRADE_PATH_FILE" && run systemctl restart "$UPGRADE_PATH_FILE" && run systemctl is-active --quiet "$UPGRADE_PATH_FILE"; then return 0; fi ;;
+    openrc)
+      if run rc-update add "$UPGRADE_SERVICE_NAME" default && run rc-service "$UPGRADE_SERVICE_NAME" restart; then return 0; fi ;;
+  esac
+  printf '%s\n' "Upgrade supervisor failed to start: $UPGRADE_SERVICE_NAME. Panel-driven upgrades are unavailable; the Agent remains installed." >&2
+  agent_stop_upgrade_supervisor || return 1
+}
+
+agent_stop_upgrade_supervisor() {
+  agent_upgrade_service_paths
+  UPGRADE_SUPERVISOR_BLOCKED=0
+  [ -n "$UPGRADE_SERVICE_FILE" ] || return 0
+  if [ -e "$UPGRADE_SERVICE_FILE" ] || [ -L "$UPGRADE_SERVICE_FILE" ]; then
+    if ! agent_upgrade_service_owned; then
+      printf '%s\n' "Upgrade supervisor disabled: unowned service $UPGRADE_SERVICE_NAME was left unchanged." >&2
+      UPGRADE_SUPERVISOR_BLOCKED=1
+      return 0
+    fi
+    case "$SERVICE_MODE" in
+      systemd)
+        run systemctl disable --now "$(basename "$UPGRADE_PATH_FILE")" || return 1
+        run systemctl disable --now "$(basename "$UPGRADE_SERVICE_FILE")" || return 1 ;;
+      openrc)
+        run rc-service "$UPGRADE_SERVICE_NAME" stop || return 1
+        upgrade_default_services="$(run rc-update show default)" || return 1
+        if printf '%s\n' "$upgrade_default_services" | awk -v service="$UPGRADE_SERVICE_NAME" '$1 == service { found=1 } END { exit !found }'; then
+          run rc-update del "$UPGRADE_SERVICE_NAME" default || return 1
+        fi ;;
+    esac
+  fi
+}
+
+agent_remove_upgrade_supervisor() {
+  [ "${OS_NAME:-${PLATFORM_OS:-}}" = linux ] && [ "$(id -u)" = 0 ] || return 0
+  agent_stop_upgrade_supervisor || return 1
+  [ -n "$UPGRADE_SERVICE_FILE" ] && [ "${UPGRADE_SUPERVISOR_BLOCKED:-0}" = 0 ] || return 0
+  if [ -e "$UPGRADE_SERVICE_FILE" ]; then run rm -f "$UPGRADE_SERVICE_FILE" || return 1; fi
+  if [ -n "$UPGRADE_PATH_FILE" ] && [ -e "$UPGRADE_PATH_FILE" ]; then
+    if agent_upgrade_path_owned; then run rm -f "$UPGRADE_PATH_FILE" || return 1; fi
+  fi
+}
+
+agent_remove_upgrade_supervisors_for_all() (
+  case "$SERVICE_MODE" in
+    systemd) set -- /etc/systemd/system/*-upgrade.service ;;
+    openrc) set -- /etc/init.d/*-upgrade ;;
+    *) exit 0 ;;
+  esac
+  for upgrade_file in "$@"; do
+    [ -f "$upgrade_file" ] && [ ! -L "$upgrade_file" ] || continue
+    grep -Fqx '# cf-vps-monitor-upgrade:1' "$upgrade_file" || continue
+    install_value="$(sed -n 's/^# install: //p' "$upgrade_file")"
+    service_value="$(sed -n 's/^# service: //p' "$upgrade_file")"
+    [ -n "$install_value" ] && [ -n "$service_value" ] && [ ! -L "$install_value" ] || continue
+    case "$SERVICE_MODE" in
+      systemd)
+        [ -f "/etc/systemd/system/${service_value}.service" ] || continue
+        run systemctl disable --now "${service_value}-upgrade.path" 2>/dev/null || :
+        run systemctl disable --now "${service_value}-upgrade.service" 2>/dev/null || :
+        run rm -f "$upgrade_file" "/etc/systemd/system/${service_value}-upgrade.path" 2>/dev/null || : ;;
+      openrc)
+        [ -f "/etc/init.d/${service_value}" ] || continue
+        run rc-service "${service_value}-upgrade" stop 2>/dev/null || :
+        run rc-update del "${service_value}-upgrade" default 2>/dev/null || :
+        run rm -f "$upgrade_file" 2>/dev/null || : ;;
+    esac
+  done
+)
+
+agent_upgrade_load_config() {
+  upgrade_config_file="${ENV_FILE:-${RUNNER_FILE:-}}"
+  [ -n "$upgrade_config_file" ] && [ -f "$upgrade_config_file" ] && [ ! -L "$upgrade_config_file" ] || return 0
+  upgrade_read() {
+    agent_disk_config_value "$upgrade_config_file" "$1" 2>/dev/null || printf ''
+  }
+  [ -n "$SERVER" ] || SERVER="$(upgrade_read CF_MONITOR_SERVER)"
+  [ -n "$TOKEN" ] || TOKEN="$(upgrade_read CF_MONITOR_TOKEN)"
+  if [ "${NODE_NAME_SET:-0}" = 0 ]; then
+    upgrade_stored_name="$(upgrade_read CF_MONITOR_NAME)"
+    [ -z "$upgrade_stored_name" ] || NODE_NAME="$upgrade_stored_name"
+  fi
+  if [ "${MODE_SET:-0}" = 0 ]; then
+    upgrade_stored_mode="$(upgrade_read CF_MONITOR_MODE)"
+    [ -z "$upgrade_stored_mode" ] || MODE="$upgrade_stored_mode"
+  fi
+  [ -n "$MOUNT_INCLUDE" ] || MOUNT_INCLUDE="$(upgrade_read CF_MONITOR_MOUNT_INCLUDE)"
+  [ -n "$MOUNT_EXCLUDE" ] || MOUNT_EXCLUDE="$(upgrade_read CF_MONITOR_MOUNT_EXCLUDE)"
+  [ -n "$NIC_INCLUDE" ] || NIC_INCLUDE="$(upgrade_read CF_MONITOR_NIC_INCLUDE)"
+  [ -n "$NIC_EXCLUDE" ] || NIC_EXCLUDE="$(upgrade_read CF_MONITOR_NIC_EXCLUDE)"
+  if [ "${TRAFFIC_RESET_DAY_SET:-0}" = 0 ]; then
+    upgrade_stored_day="$(upgrade_read CF_MONITOR_TRAFFIC_RESET_DAY)"
+    [ -z "$upgrade_stored_day" ] || TRAFFIC_RESET_DAY="$upgrade_stored_day"
+  fi
+}
+
 sanitize_instance_id() {
   local raw="${1:-}"
   local cleaned
@@ -937,6 +1202,7 @@ apply_instance_defaults() {
 uninstall_all_agents() {
   [[ "$YES" == "1" ]] || { echo '--uninstall-all requires --yes.' >&2; return 1; }
   if is_macos; then SERVICE_MODE=launchctl; else SERVICE_MODE=systemd; fi
+  agent_remove_upgrade_supervisors_for_all || return 1
   agent_remove_prefixed_system_instances || return 1
 }
 
@@ -972,11 +1238,11 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -s|--server) SERVER="${2:-}"; shift 2 ;;
     -t|--token) TOKEN="${2:-}"; shift 2 ;;
-    -n|--name) NODE_NAME="${2:-}"; shift 2 ;;
+    -n|--name) NODE_NAME="${2:-}"; NODE_NAME_SET=1; shift 2 ;;
     --interval) INTERVAL="${2:-}"; shift 2 ;;
     --ping-interval) PING_INTERVAL="${2:-}"; shift 2 ;;
-    -r|--traffic-reset-day) TRAFFIC_RESET_DAY="${2:-}"; shift 2 ;;
-    --mode) MODE="${2:-}"; shift 2 ;;
+    -r|--traffic-reset-day) TRAFFIC_RESET_DAY="${2:-}"; TRAFFIC_RESET_DAY_SET=1; shift 2 ;;
+    --mode) MODE="${2:-}"; MODE_SET=1; shift 2 ;;
     -i|--instance-id) INSTANCE_ID="${2:-}"; shift 2 ;;
     --install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
     --service-name|--install-service-name) SERVICE_NAME="${2:-}"; shift 2 ;;
@@ -999,6 +1265,7 @@ while [[ $# -gt 0 ]]; do
     --ignore-unsafe-cert) IGNORE_UNSAFE_CERT="1"; shift ;;
     --install-ghproxy) INSTALL_GHPROXY="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN="1"; shift ;;
+    --upgrade) UPGRADE="1"; shift ;;
     --uninstall) UNINSTALL="1"; shift ;;
     --uninstall-all) UNINSTALL_ALL="1"; shift ;;
     --yes|-y) YES="1"; shift ;;
@@ -1046,8 +1313,17 @@ if is_macos; then SERVICE_MODE=launchctl; ENV_FILE=""; else SERVICE_MODE=systemd
 agent_assert_instance "$UNINSTALL" || exit 1
 
 if [[ "$UNINSTALL" == "1" ]]; then
+  agent_remove_upgrade_supervisor || exit 1
   agent_remove_owned_system || exit 1
   exit 0
+fi
+
+if [[ "$UPGRADE" == "1" ]]; then
+  if [[ ! -f "$INSTALL_DIR/cf-vps-monitor-agent" ]]; then
+    echo "--upgrade requires an existing installation at ${INSTALL_DIR}; run the installer without --upgrade first." >&2
+    exit 1
+  fi
+  agent_upgrade_load_config
 fi
 
 if [[ -z "$SERVER" || -z "$TOKEN" ]]; then
@@ -1173,6 +1449,7 @@ fi
 run mkdir -p "$INSTALL_DIR"
 run install -m 0755 "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
 agent_prepare_disk_collector || exit 1
+agent_prepare_upgrade_supervisor || exit 1
 run mkdir -p "$STATE_DIR"
 if ! is_macos; then
   run chown -R cf-vps-monitor-agent:cf-vps-monitor-agent "$STATE_DIR"
@@ -1317,6 +1594,7 @@ run systemctl daemon-reload
 run systemctl enable "$SERVICE_NAME"
 run systemctl restart "$SERVICE_NAME"
 agent_start_disk_collector || exit 1
+agent_start_upgrade_supervisor || exit 1
 
 echo "Installed ${SERVICE_NAME}."
 echo "Status: systemctl status ${SERVICE_NAME}"

@@ -202,6 +202,10 @@ type Report struct {
 	BasicInfo           *BasicInfo           `json:"basic_info,omitempty"`
 	PingResults         []PingResult         `json:"ping_results,omitempty"`
 	WebsiteProbeResults []WebsiteProbeResult `json:"website_probe_results,omitempty"`
+	// UpgradeResults carries terminal results of panel-driven upgrades. It is
+	// attached to the report by the new (post-restart) process, whose Version
+	// already reflects the target; the Worker cross-checks this.
+	UpgradeResults []upgradeResult `json:"upgrade_results,omitempty"`
 
 	hasRawNetTotals bool
 	rawNetTotalUp   int64
@@ -422,6 +426,9 @@ type serverMessage struct {
 	// 指针：字段缺席表示「后台没有这个节点的重置日」，此时保留本地取值，
 	// 不能被一个默认 1 悄悄改掉安装时指定的 --traffic-reset-day。
 	TrafficResetDay *int `json:"traffic_reset_day,omitempty"`
+	// UpgradeTasks carries panel-issued upgrade commands for this node. The Agent
+	// reacts to them without blocking the report loop.
+	UpgradeTasks []upgradeTask `json:"upgrade_tasks,omitempty"`
 }
 
 type agentPolicy = serverMessage
@@ -490,10 +497,14 @@ func init() {
 	flag.Bool("disk-usage-check", false, "Check whether root directory collection is required (exit 0 required, 3 not required)")
 	flag.StringVar(&nicInclude, "nic-include", "", "Comma-separated network interface patterns to include in traffic totals, for example eth*,ens*")
 	flag.StringVar(&nicExclude, "nic-exclude", "", "Comma-separated network interface patterns to exclude from traffic totals, for example lo,docker*,veth*")
+	registerUpgradeFlags()
 }
 
 func main() {
 	if handled, code := handleDirectoryCollectorCLI(os.Args[1:], os.Stderr); handled {
+		os.Exit(code)
+	}
+	if handled, code := handleUpgradeCLI(os.Args[1:], os.Stdout, os.Stderr); handled {
 		os.Exit(code)
 	}
 	flag.Parse()
@@ -1272,6 +1283,7 @@ func runHTTPReporter() {
 				policyExpiresAt = time.Now().Add(time.Duration(ttl) * time.Second)
 				pingState.applyPolicy(policy)
 				applyTrafficResetDayPolicy(policy)
+				upgradeRuntime.processTasks(policy.UpgradeTasks)
 				nextSampleInterval, nextUploadInterval := policyDurations(policy, currentSampleInterval)
 				if nextSampleInterval != currentSampleInterval || nextUploadInterval != currentUploadInterval {
 					currentSampleInterval = nextSampleInterval
@@ -1468,6 +1480,8 @@ func runWebSocketSession(
 			if len(inFlight) > 0 {
 				stopAckTimer()
 				pingState.acknowledgeReports(inFlight)
+				upgradeRuntime.acknowledge()
+				reportUpgradeHealth()
 				inFlight = nil
 				if err := flush(); err != nil {
 					return err
@@ -1479,6 +1493,7 @@ func runWebSocketSession(
 			}
 			pingState.applyPolicy(policy)
 			applyTrafficResetDayPolicy(policy)
+			upgradeRuntime.processTasks(policy.UpgradeTasks)
 			currentInterval, currentUploadInterval = policyDurations(policy, currentInterval)
 			reportInterval = int(currentInterval / time.Second)
 			if policy.ReportNow {
@@ -3214,6 +3229,7 @@ func sendHTTPReports(reports []Report) error {
 	if len(reports) > maxReportsPerEnvelope {
 		return fmt.Errorf("report envelope exceeds %d reports", maxReportsPerEnvelope)
 	}
+	attachUpgradeResults(reports)
 	endpoint := serverURL + "/api/clients/report"
 	payload := any(reports[0])
 	if len(reports) > 1 {
@@ -3237,6 +3253,10 @@ func sendHTTPReports(reports []Report) error {
 	if !accepted.Success {
 		return errors.New("server did not accept the report")
 	}
+	// The server accepted this batch: consume any upgrade results it carried and
+	// record the health beacon so a supervisor can confirm the restart.
+	upgradeRuntime.acknowledge()
+	reportUpgradeHealth()
 	if len(reports) == 1 {
 		logReport("HTTP report accepted", reports[0])
 	} else {
@@ -3284,6 +3304,7 @@ func sendWebSocketReports(conn *safeWebSocketConn, reports []Report) error {
 	if len(reports) == 0 {
 		return nil
 	}
+	attachUpgradeResults(reports)
 	if len(reports) == 1 {
 		if err := conn.WriteJSON(reportEnvelope{Type: "report", Data: reports[0]}); err != nil {
 			return err

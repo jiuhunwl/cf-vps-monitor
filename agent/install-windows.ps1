@@ -37,6 +37,7 @@ param(
   [switch]$IgnoreUnsafeCert,
   [string]$InstallGhproxy = "",
   [switch]$DryRun,
+  [switch]$Upgrade,
   [switch]$Uninstall,
   [switch]$UninstallAll,
   [switch]$Yes,
@@ -266,6 +267,18 @@ $releaseBase = Resolve-ReleaseBase
 function ConvertTo-PowerShellLiteral {
   param([string]$Value)
   return "'" + ($Value -replace "'", "''") + "'"
+}
+
+# Read a single `$env:CF_MONITOR_* = '...'` assignment from a generated runner.
+# Only the focused allowlist keys are ever read; the file is treated as data.
+function Get-ExistingRunnerValue {
+  param([string]$Path, [string]$Name)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
+  $pattern = '^\s*\$env:' + [Regex]::Escape($Name) + "\s*=\s*'(.*)'\s*$"
+  foreach ($line in Get-Content -LiteralPath $Path) {
+    if ($line -match $pattern) { return ($Matches[1] -replace "''", "'") }
+  }
+  return ""
 }
 
 function Join-GitHubProxy {
@@ -685,13 +698,34 @@ if ($ServiceName -match '[\\/\*?\[\]]') {
   throw '-ServiceName cannot contain path separators or wildcard characters.'
 }
 
-$InstallDir = Assert-AgentInstallDirectory -Directory $InstallDir -Id $NormalizedInstanceId -TaskName $ServiceName -RequireOwnership:$Uninstall
+$InstallDir = Assert-AgentInstallDirectory -Directory $InstallDir -Id $NormalizedInstanceId -TaskName $ServiceName -RequireOwnership:($Uninstall -or $Upgrade)
 Assert-AgentSystemResources -Directory $InstallDir -Id $NormalizedInstanceId -TaskName $ServiceName
 
 $targetExe = Join-Path $InstallDir "cf-vps-monitor-agent.exe"
 $runnerPath = Join-Path $InstallDir "run-agent.ps1"
 $StateDir = Join-Path $InstallDir "state"
 $AgentLogPath = Join-Path $StateDir "agent.log"
+
+if ($Upgrade) {
+  if ($Uninstall -or $UninstallAll) { throw "-Upgrade cannot be combined with -Uninstall or -UninstallAll." }
+  if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
+    throw "-Upgrade requires an existing installation at $InstallDir; run the installer without -Upgrade first."
+  }
+  # Reuse the saved configuration so an upgrade does not need -Server/-Token again.
+  if ([string]::IsNullOrWhiteSpace($Server)) { $Server = Get-ExistingRunnerValue -Path $runnerPath -Name 'CF_MONITOR_SERVER' }
+  if ([string]::IsNullOrWhiteSpace($Token)) { $Token = Get-ExistingRunnerValue -Path $runnerPath -Name 'CF_MONITOR_TOKEN' }
+  foreach ($pair in @(
+      @{ Variable = 'Name'; Key = 'CF_MONITOR_NAME' },
+      @{ Variable = 'MountInclude'; Key = 'CF_MONITOR_MOUNT_INCLUDE' },
+      @{ Variable = 'MountExclude'; Key = 'CF_MONITOR_MOUNT_EXCLUDE' },
+      @{ Variable = 'NicInclude'; Key = 'CF_MONITOR_NIC_INCLUDE' },
+      @{ Variable = 'NicExclude'; Key = 'CF_MONITOR_NIC_EXCLUDE' })) {
+    $stored = Get-ExistingRunnerValue -Path $runnerPath -Name $pair.Key
+    if (-not [string]::IsNullOrWhiteSpace($stored)) {
+      Set-Variable -Name $pair.Variable -Value $stored
+    }
+  }
+}
 
 if ($Uninstall) {
   $removedTask = Remove-AgentTask $ServiceName
