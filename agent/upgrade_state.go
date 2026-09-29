@@ -75,8 +75,13 @@ type upgradeTask struct {
 }
 
 // upgradeRequest is written by the (non-root) Agent and consumed by the root
-// supervisor. Only TargetVersion/ReleaseBase/Proxy/GhProxy are trusted; every
-// path the supervisor acts on comes from its own argv, never from this file.
+// supervisor. It is untrusted input: the file lives in $STATE_DIR, which the
+// installer chowns to the non-root Agent user. Only CommandID and TargetVersion
+// are honoured from here; both the paths and the download origin (release base,
+// proxy, ghproxy) come from the supervisor's own argv. Honouring the origin
+// would let anyone who can write this file point the download — binary and
+// SHA256SUMS alike — at a host they control, which defeats checksum
+// verification and hands root code execution to a non-root writer.
 type upgradeRequest struct {
 	CommandID     string `json:"command_id"`
 	TargetVersion string `json:"target_version"`
