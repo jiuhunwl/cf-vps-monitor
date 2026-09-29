@@ -27,6 +27,7 @@ function fixture({ initial = [], controls = [node], dbOverrides = {} } = {}) {
     getSetting: async () => null, setSetting: async () => {},
     updateClient: async (_database, uuid, patch) => patches.push({ uuid, ...patch }),
     listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    fetchAgentUpgradeTasksForClient: async () => [],
     insertAuditLog: async () => {}, tryClaimAuditThrottle: async () => true,
     ...dbOverrides,
   } });

@@ -27,6 +27,7 @@ function fixture({ initial = [], settings = {}, overrides = {} } = {}) {
     getHistoryStorageUsage: async () => ({ live_rows: 1, live_row_bytes: 228, estimated_live_storage_bytes: 420, allocated_bytes: 420, reusable_bytes: null, measurement: 'live-row-bytes-plus-index-estimate' }),
     insertRecord: async (_database, record) => { writes.push(record); },
     updateClient: async () => {}, listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    fetchAgentUpgradeTasksForClient: async () => [],
     getSetting: async () => null, setSetting: async () => {},
     tryClaimAuditThrottle: async () => true, insertAuditLog: async () => {},
     ...overrides,

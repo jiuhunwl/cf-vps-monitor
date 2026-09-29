@@ -38,6 +38,7 @@ import { EMAIL_MESSAGE_MAX_CHARS } from '../utils/email';
 import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
+import { fetchLatestAgentRelease } from '../utils/agent-release';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
 import { bytesToBase64 } from '../utils/theme-package';
@@ -3261,6 +3262,119 @@ adminRoutes.post('/test/sendMessage', async (c) => {
       { auditAction: `${component}_error`, auditUser: c.get('username') || 'system' },
     );
     return c.json({ error: '发送测试消息失败' }, 500);
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * Agent 一键升级管理路由（T03）
+ * 设计契约：docs/system_design.md §4.2.4 第 426-436 行。
+ * 响应信封：扁平 { success: true, ... } / { success: false, error }。
+ * ------------------------------------------------------------------------- */
+
+const MAX_UPGRADE_UUIDS_PER_REQUEST = 200;
+
+// GET /agents/upgrade/release —— 返回最新 release 信息（带缓存）
+adminRoutes.get('/agents/upgrade/release', async (c) => {
+  const metrics: TimingMetric[] = [];
+  try {
+    const now = Date.now();
+    const info = await timed(metrics, 'release_lookup', () =>
+      fetchLatestAgentRelease({ CF_MONITOR_RELEASE_REPOSITORY: c.env.CF_MONITOR_RELEASE_REPOSITORY }, now),
+    );
+    return c.json({
+      success: true,
+      latest_version: info.latest_version,
+      published_at: info.published_at,
+      cached: info.cached === true,
+    });
+  } catch (e) {
+    return c.json({ success: false, error: `获取最新版本失败: ${errorDetail(e)}` }, 502);
+  } finally {
+    setServerTiming(c, metrics);
+  }
+});
+
+// GET /agents/upgrade/status?ids=csv —— 批量查询命令状态（不存在的 id 静默忽略）
+adminRoutes.get('/agents/upgrade/status', async (c) => {
+  const metrics: TimingMetric[] = [];
+  try {
+    const raw = c.req.query('ids') || '';
+    const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      return c.json({ success: true, commands: [] });
+    }
+    if (ids.length > MAX_UPGRADE_UUIDS_PER_REQUEST) {
+      return c.json({ success: false, error: `ids 数量超过上限 ${MAX_UPGRADE_UUIDS_PER_REQUEST}` }, 400);
+    }
+    const database = getDatabase(c.env);
+    const commands = await timed(metrics, 'list_commands', () =>
+      db.listAgentUpgradeCommands(database, { ids }),
+    );
+    return c.json({ success: true, commands });
+  } catch (e) {
+    return c.json({ success: false, error: `查询升级状态失败: ${errorDetail(e)}` }, 502);
+  } finally {
+    setServerTiming(c, metrics);
+  }
+});
+
+// POST /agents/upgrade —— 为若干节点创建升级命令
+adminRoutes.post('/agents/upgrade', async (c) => {
+  const metrics: TimingMetric[] = [];
+  try {
+    const parsed = await timed(metrics, 'parse_body', () => readAdminJsonObject(c));
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+    const uuids = Array.isArray(body.uuids)
+      ? body.uuids.filter((u): u is string => typeof u === 'string' && u.trim() !== '').map((u) => u.trim())
+      : [];
+    if (uuids.length === 0) {
+      return c.json({ success: false, error: 'uuids 不能为空' }, 400);
+    }
+    if (uuids.length > MAX_UPGRADE_UUIDS_PER_REQUEST) {
+      return c.json({ success: false, error: `uuids 数量超过上限 ${MAX_UPGRADE_UUIDS_PER_REQUEST}` }, 400);
+    }
+    const rawTarget = typeof body.target_version === 'string' ? body.target_version.trim() : '';
+    const requestedBy = c.get('username') || '';
+
+    const database = getDatabase(c.env);
+
+    // 解析 latest → 具体 tag（Worker 侧固化，不让节点下载二进制才能得知版本）
+    let targetVersion = rawTarget;
+    if (rawTarget === '' || rawTarget.toLowerCase() === 'latest') {
+      const release = await timed(metrics, 'resolve_latest', () =>
+        fetchLatestAgentRelease({ CF_MONITOR_RELEASE_REPOSITORY: c.env.CF_MONITOR_RELEASE_REPOSITORY }, Date.now()),
+      );
+      if (!release.latest_version) {
+        return c.json({ success: false, error: '暂时无法解析最新版本，请稍后再试' }, 502);
+      }
+      targetVersion = release.latest_version;
+    }
+
+    // RPC 内部已处理「每节点仅 1 条未决」「节点不存在跳过」等语义
+    const rpcResult = await timed(metrics, 'create_commands', () =>
+      db.createAgentUpgradeCommands(database, uuids, targetVersion, requestedBy),
+    );
+
+    // 写审计日志（后台，不阻塞响应）
+    runAdminBackground(c, db.insertAuditLog(
+      database,
+      requestedBy,
+      'agent_upgrade_create',
+      `下发升级命令: target=${targetVersion}; uuids=${uuids.join(',')}; created=${rpcResult.created}; skipped=${JSON.stringify(rpcResult.skipped)}`,
+    ));
+
+    return c.json({
+      success: true,
+      target_version: targetVersion,
+      created: rpcResult.created,
+      skipped: rpcResult.skipped,
+      commands: rpcResult.commands,
+    });
+  } catch (e) {
+    return c.json({ success: false, error: `下发升级命令失败: ${errorDetail(e)}` }, 502);
+  } finally {
+    setServerTiming(c, metrics);
   }
 });
 

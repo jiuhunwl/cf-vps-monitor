@@ -26,6 +26,7 @@ async function fixture({ sameUuid = false, removed = false, includeClients = tru
     getSettingsByKeys: async () => ({ record_enabled: 'false' }),
     getSetting: async () => null, setSetting: async () => {},
     listPingTasks: async () => [], listWebsiteMonitors: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    fetchAgentUpgradeTasksForClient: async () => [],
     listOfflineNotifications: async () => [], listExpiryNotifications: async () => [], listLoadNotifications: async () => [],
     restoreBackupData: async (_db, backup) => {
       restoreCalls += 1;

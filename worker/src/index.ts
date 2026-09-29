@@ -60,6 +60,7 @@ type RuntimeBindings = {
   JWT_SECRET?: string;
   SETUP_DIAGNOSTICS_ENABLED?: string;
   CURRENT_GIT_COMMIT?: string;
+  CF_MONITOR_RELEASE_REPOSITORY?: string;
 };
 
 // Wrangler owns configured bindings; this adds runtime-only optional values.

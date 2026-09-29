@@ -18,6 +18,7 @@ for (const action of ['hide', 'remove', 'rename', 'none']) {
       updateClient: async () => { startedResolve(); await release; },
       getSetting: async () => null, setSetting: async () => {},
       listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    fetchAgentUpgradeTasksForClient: async () => [],
     } });
     const { LiveDataDO } = loader.load('worker/src/do/live-data.ts');
     const object = new LiveDataDO(storage.state, {});

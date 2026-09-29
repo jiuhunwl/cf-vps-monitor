@@ -7,6 +7,7 @@ function fixture(client) {
     db: {
       getSettingsByKeys: async () => ({}), getClient: async () => client,
       listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    fetchAgentUpgradeTasksForClient: async () => [],
     },
     expose: { 'worker/src/routes/client.ts': ['fallbackAgentPolicy'] },
   });

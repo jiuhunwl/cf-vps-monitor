@@ -5869,3 +5869,304 @@ end;
 $$;
 revoke all on function public.cfm_mark_load_notification_sent(integer, text, text, text) from public, anon, authenticated;
 grant execute on function public.cfm_mark_load_notification_sent(integer, text, text, text) to service_role;
+
+-- ============================================================================
+-- Agent 一键升级命令（T03）
+-- 设计契约：docs/system_design.md §4.2（第 331-436 行）。两份 SQL（本文件与
+-- supabase/tools/UPGRADE_ALL_safe.sql）的函数体必须逐字等价 —— 这是仓库的硬约定。
+-- ============================================================================
+
+create table if not exists agent_upgrade_commands (
+  id             uuid primary key default gen_random_uuid(),
+  client_uuid    text not null,
+  target_version text not null,              -- 已固化的具体 tag（"latest" 由 Worker 侧解析后传入）
+  requested_by   text not null default '',
+  status         text not null default 'queued',  -- queued|dispatched|running|success|already_latest|failed|rolled_back|unverified
+  from_version   text,                       -- 升级前（回执或下发时快照）
+  final_version  text,                       -- 回执中的实际最终版本
+  failure_code   text,
+  failure_reason text,
+  created_at     timestamptz not null default now(),
+  dispatched_at  timestamptz,
+  completed_at   timestamptz,
+  updated_at     timestamptz not null default now()
+);
+create index if not exists idx_agent_upgrade_commands_client
+  on agent_upgrade_commands (client_uuid, status);
+create index if not exists idx_agent_upgrade_commands_created
+  on agent_upgrade_commands (created_at desc);
+
+-- 面板下发：为若干节点创建升级命令。
+-- 每节点同时只允许 1 条未决命令（queued/dispatched/running），重复创建计入 skipped。
+-- target_version 必须是已固化的具体 tag；RPC 不接受 "latest"（由 Worker 侧解析）。
+create or replace function public.cfm_create_agent_upgrade_commands(input jsonb)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  v_client_uuids text[] := coalesce(array(select jsonb_array_elements_text(input->'client_uuids')), '{}'::text[]);
+  v_target_version text := coalesce(input->>'target_version', '');
+  v_requested_by  text := coalesce(input->>'requested_by', '');
+  v_uuid text;
+  v_created int := 0;
+  v_skipped jsonb := '[]'::jsonb;
+  v_commands jsonb := '[]'::jsonb;
+  v_pending_statuses text[] := array['queued', 'dispatched', 'running'];
+  v_existing_id uuid;
+  v_row record;
+begin
+  if v_target_version = '' or lower(v_target_version) = 'latest' then
+    -- "latest" 必须由 Worker 侧解析为具体 tag 后再下发；RPC 只接受已固化的 tag。
+    return jsonb_build_object(
+      'created', 0,
+      'skipped', jsonb_build_array(),
+      'commands', '[]'::jsonb,
+      'invalid_target', true
+    );
+  end if;
+  foreach v_uuid in array v_client_uuids loop
+    if v_uuid is null or v_uuid = '' then continue; end if;
+    -- 已有未决命令 ⇒ 跳过（每节点同时只允许 1 条未决）
+    select id into v_existing_id
+      from agent_upgrade_commands
+      where client_uuid = v_uuid and status = any(v_pending_statuses)
+      limit 1;
+    if v_existing_id is not null then
+      v_skipped := v_skipped || jsonb_build_object('client_uuid', v_uuid, 'reason', 'already_pending');
+      continue;
+    end if;
+    -- 节点必须存在（不存在的 uuid 不应创建悬空命令）
+    perform 1 from clients where uuid = v_uuid limit 1;
+    if not found then
+      v_skipped := v_skipped || jsonb_build_object('client_uuid', v_uuid, 'reason', 'not_found');
+      continue;
+    end if;
+    insert into agent_upgrade_commands (client_uuid, target_version, requested_by)
+      values (v_uuid, v_target_version, v_requested_by)
+      returning * into v_row;
+    v_created := v_created + 1;
+    v_commands := v_commands || jsonb_build_object(
+      'id', v_row.id,
+      'client_uuid', v_row.client_uuid,
+      'target_version', v_row.target_version,
+      'requested_by', v_row.requested_by,
+      'status', v_row.status,
+      'from_version', v_row.from_version,
+      'final_version', v_row.final_version,
+      'failure_code', v_row.failure_code,
+      'failure_reason', v_row.failure_reason,
+      'created_at', to_char(v_row.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+      'dispatched_at', null,
+      'completed_at', null,
+      'updated_at', to_char(v_row.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+    );
+  end loop;
+  return jsonb_build_object(
+    'created', v_created,
+    'skipped', v_skipped,
+    'commands', v_commands
+  );
+end;
+$$;
+revoke all on function public.cfm_create_agent_upgrade_commands(jsonb) from public, anon, authenticated;
+grant execute on function public.cfm_create_agent_upgrade_commands(jsonb) to service_role;
+
+-- 节点领取：返回待执行命令（status in queued/dispatched 且未过期）并置为 dispatched。
+-- 每节点至多返回 1 条未决命令；过期判据：created_at + ttl < input_now。
+create or replace function public.cfm_agent_upgrade_tasks(
+  input_client text, input_now timestamptz, input_limit int
+)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  v_limit int := least(greatest(coalesce(input_limit, 1), 1), 1);  -- 每节点每轮至多 1 条未决
+  v_ttl_sec int := 600;  -- 10 分钟未领取视为过期
+  v_row record;
+  v_commands jsonb := '[]'::jsonb;
+begin
+  if input_client is null or input_client = '' or input_now is null then
+    return '[]'::jsonb;
+  end if;
+  -- 过期未领取的 queued → failed(timeout)
+  update agent_upgrade_commands
+    set status = 'failed', failure_code = 'timeout', failure_reason = 'upgrade command expired before dispatch',
+        completed_at = input_now, updated_at = input_now
+    where client_uuid = input_client and status = 'queued'
+      and created_at + (v_ttl_sec || ' seconds')::interval < input_now;
+  -- 取该节点最旧的未决命令并置 dispatched
+  select * into v_row
+    from agent_upgrade_commands
+    where client_uuid = input_client and status in ('queued','dispatched')
+    order by created_at asc limit 1;
+  if v_row is null then
+    return '[]'::jsonb;
+  end if;
+  if v_row.status = 'queued' then
+    update agent_upgrade_commands
+      set status = 'dispatched', dispatched_at = input_now, updated_at = input_now
+      where id = v_row.id and status = 'queued'
+      returning * into v_row;
+  end if;
+  return jsonb_build_array(jsonb_build_object(
+    'id', v_row.id,
+    'client_uuid', v_row.client_uuid,
+    'target_version', v_row.target_version,
+    'requested_by', v_row.requested_by,
+    'status', v_row.status,
+    'from_version', v_row.from_version,
+    'final_version', v_row.final_version,
+    'failure_code', v_row.failure_code,
+    'failure_reason', v_row.failure_reason,
+    'created_at', to_char(v_row.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+    'dispatched_at', case when v_row.dispatched_at is not null then to_char(v_row.dispatched_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') else null end,
+    'completed_at', case when v_row.completed_at is not null then to_char(v_row.completed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') else null end,
+    'updated_at', to_char(v_row.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+  ));
+end;
+$$;
+revoke all on function public.cfm_agent_upgrade_tasks(text, timestamptz, int) from public, anon, authenticated;
+grant execute on function public.cfm_agent_upgrade_tasks(text, timestamptz, int) to service_role;
+
+-- 回执：记录结果并置终态。
+-- 交叉校验：status=success 但 final_version != target_version → 存 unverified；
+-- 失败/回滚类要求 final_version == from_version，不一致同样降级 unverified（保留 failure_code）。
+-- 终态不可被非终态覆盖（幂等去重）。
+create or replace function public.cfm_record_agent_upgrade_result(input jsonb)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  v_command_id    text := coalesce(input->>'command_id', '');
+  v_client_uuid   text := coalesce(input->>'client_uuid', '');
+  v_status        text := coalesce(input->>'status', '');
+  v_target        text := coalesce(input->>'target_version', '');
+  v_from_version  text := coalesce(input->>'from_version', '');
+  v_final_version text := coalesce(input->>'final_version', '');
+  v_failure_code  text := coalesce(input->>'failure_code', '');
+  v_reason        text := coalesce(input->>'failure_reason', input->>'reason', '');
+  v_reported_at   text := coalesce(input->>'reported_at', '');
+  v_existing record;
+  v_terminal_statuses text[] := array['success','already_latest','failed','rolled_back','unverified'];
+  v_effective_status text := v_status;
+  v_effective_failure_code text := v_failure_code;
+  v_ts timestamptz;
+begin
+  if v_command_id = '' or v_client_uuid = '' or v_status = '' then
+    return jsonb_build_object('ok', false, 'reason', 'missing required field');
+  end if;
+  v_ts := case when v_reported_at <> '' then nullif(v_reported_at, '')::timestamptz else now() end;
+  select * into v_existing
+    from agent_upgrade_commands
+    where id = v_command_id::uuid and client_uuid = v_client_uuid
+    limit 1;
+  if not found then
+    return jsonb_build_object('ok', false, 'reason', 'command not found');
+  end if;
+  -- 终态幂等：已是终态则忽略任何后续上报
+  if v_existing.status = any(v_terminal_statuses) then
+    return jsonb_build_object('ok', true, 'idempotent', true, 'status', v_existing.status);
+  end if;
+  -- 交叉校验：success 但 final != target → unverified
+  if v_status = 'success' and v_final_version is not null and v_final_version <> '' and v_final_version <> v_target then
+    v_effective_status := 'unverified';
+    v_effective_failure_code := coalesce(nullif(v_failure_code, ''), 'probe_failed');
+  end if;
+  -- 失败/回滚要求 final == from（节点未升级成功）；不一致则降级 unverified 但保留 failure_code
+  if v_status in ('failed','rolled_back') and v_final_version is not null and v_final_version <> '' and v_final_version <> v_from_version then
+    v_effective_status := 'unverified';
+  end if;
+  update agent_upgrade_commands
+    set status = v_effective_status,
+        from_version = coalesce(nullif(v_from_version, ''), from_version),
+        final_version = case when v_final_version is null or v_final_version = '' then final_version else v_final_version end,
+        failure_code = case when v_effective_status in ('failed','rolled_back','unverified') then v_effective_failure_code else null end,
+        failure_reason = case when v_effective_status in ('failed','rolled_back','unverified') then v_reason else null end,
+        completed_at = v_ts,
+        updated_at = v_ts
+    where id = v_command_id::uuid and client_uuid = v_client_uuid
+    returning * into v_existing;
+  return jsonb_build_object(
+    'ok', true,
+    'id', v_existing.id,
+    'status', v_existing.status,
+    'final_version', v_existing.final_version
+  );
+end;
+$$;
+revoke all on function public.cfm_record_agent_upgrade_result(jsonb) from public, anon, authenticated;
+grant execute on function public.cfm_record_agent_upgrade_result(jsonb) to service_role;
+
+-- 面板查询：批量取状态。不存在的 id 静默忽略。
+create or replace function public.cfm_list_agent_upgrade_commands(input jsonb)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  v_ids text[] := coalesce(array(select jsonb_array_elements_text(input->'ids')), '{}'::text[]);
+  v_client_uuids text[] := coalesce(array(select jsonb_array_elements_text(input->'client_uuids')), '{}'::text[]);
+  v_limit int := least(greatest(coalesce((input->>'limit')::int, 200), 1), 200);
+begin
+  if cardinality(v_ids) = 0 and cardinality(v_client_uuids) = 0 then
+    return '[]'::jsonb;
+  end if;
+  return coalesce((
+    select coalesce(jsonb_agg(jsonb_build_object(
+      'id', id,
+      'client_uuid', client_uuid,
+      'target_version', target_version,
+      'requested_by', requested_by,
+      'status', status,
+      'from_version', from_version,
+      'final_version', final_version,
+      'failure_code', failure_code,
+      'failure_reason', failure_reason,
+      'created_at', to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+      'dispatched_at', case when dispatched_at is not null then to_char(dispatched_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') else null end,
+      'completed_at', case when completed_at is not null then to_char(completed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') else null end,
+      'updated_at', to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+    ) order by created_at desc), '[]'::jsonb)
+    from agent_upgrade_commands
+    where (cardinality(v_ids) = 0 or id = any(v_ids::uuid[]))
+      and (cardinality(v_client_uuids) = 0 or client_uuid = any(v_client_uuids))
+    limit v_limit
+  ), '[]'::jsonb);
+end;
+$$;
+revoke all on function public.cfm_list_agent_upgrade_commands(jsonb) from public, anon, authenticated;
+grant execute on function public.cfm_list_agent_upgrade_commands(jsonb) to service_role;
+
+-- 清理：把超期未回执的 dispatched 置为 failed(timeout)。返回受影响行数。
+create or replace function public.cfm_expire_agent_upgrade_commands(
+  input_now timestamptz, input_ttl_sec int
+)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  v_ttl int := greatest(coalesce(input_ttl_sec, 1800), 60);
+  v_expired int;
+begin
+  if input_now is null then
+    return jsonb_build_object('expired', 0, 'reason', 'input_now required');
+  end if;
+  with expired as (
+    update agent_upgrade_commands
+      set status = 'failed', failure_code = 'timeout',
+          failure_reason = 'no result reported before ttl',
+          completed_at = input_now, updated_at = input_now
+      where status in ('dispatched','running')
+        and created_at + (v_ttl || ' seconds')::interval < input_now
+      returning 1
+  )
+  select count(*) into v_expired from expired;
+  return jsonb_build_object('expired', v_expired);
+end;
+$$;
+revoke all on function public.cfm_expire_agent_upgrade_commands(timestamptz, int) from public, anon, authenticated;
+grant execute on function public.cfm_expire_agent_upgrade_commands(timestamptz, int) to service_role;

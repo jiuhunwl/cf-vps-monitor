@@ -18,6 +18,7 @@ async function fixture() {
     listPingTasks: async () => [],
     listWebsiteMonitors: async () => [],
     listAgentWebsiteProbeTasks: async () => [],
+    fetchAgentUpgradeTasksForClient: async () => [],
     insertAuditLog: async () => {},
   };
   const loader = createWorkerLoader({ db });

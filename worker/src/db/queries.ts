@@ -750,3 +750,47 @@ export async function tryClaimAuditThrottle(
 ): Promise<boolean> {
   return sba.trySupabaseClaimAuditThrottle(database.env, key, now, throttleMs);
 }
+
+/* ----------------------------------------------------------------------------
+ * Agent 一键升级命令查询封装（T03）
+ * -------------------------------------------------------------------------- */
+
+export async function createAgentUpgradeCommands(
+  database: QueryDatabase,
+  clientUuids: string[],
+  targetVersion: string,
+  requestedBy: string,
+): Promise<t.CreateAgentUpgradeCommandsResult> {
+  return sba.createAgentUpgradeCommands(database.env, clientUuids, targetVersion, requestedBy);
+}
+
+/** 给 policy 下发的未决命令取一条，带短 TTL 缓存以避免高频心跳打爆 DO 子请求预算。*/
+export async function fetchAgentUpgradeTasksForClient(
+  database: QueryDatabase,
+  clientUuid: string,
+  nowIso: string,
+): Promise<t.AgentUpgradeCommand[]> {
+  return sba.fetchAgentUpgradeTasksForClient(database.env, clientUuid, nowIso);
+}
+
+export async function recordAgentUpgradeResult(
+  database: QueryDatabase,
+  result: t.AgentUpgradeResult,
+): Promise<{ ok: boolean; status?: string; reason?: string; idempotent?: boolean }> {
+  return sba.recordAgentUpgradeResult(database.env, result as unknown as Record<string, unknown>);
+}
+
+export async function listAgentUpgradeCommands(
+  database: QueryDatabase,
+  options: { ids?: string[]; clientUuids?: string[]; limit?: number },
+): Promise<t.AgentUpgradeCommand[]> {
+  return sba.listAgentUpgradeCommands(database.env, options);
+}
+
+export async function expireAgentUpgradeCommands(
+  database: QueryDatabase,
+  nowIso: string,
+  ttlSec: number,
+): Promise<t.ExpireAgentUpgradeCommandsResult> {
+  return sba.expireAgentUpgradeCommands(database.env, nowIso, ttlSec);
+}

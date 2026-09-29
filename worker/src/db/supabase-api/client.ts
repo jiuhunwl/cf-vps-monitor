@@ -1,7 +1,7 @@
 import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, ClientVisibility, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, HistoryTableRowCounts,
   HistoryTableByteSizes, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorRecord, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PublicClientRow, PublicWebsiteMonitor, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User, WebsiteCheck, WebsiteCheckInput, WebsiteMonitor, WebsiteMonitorInput } from '../types.ts';
 import type { BackupData } from '../../utils/backup.ts';
-import type { BackupConfigurationSnapshot, HistoryStorageUsage, NotificationDeliveryClaim, NotificationDeliveryCleanupOptions, NotificationDeliveryCleanupResult } from '../types.ts';
+import type { BackupConfigurationSnapshot, HistoryStorageUsage, NotificationDeliveryClaim, NotificationDeliveryCleanupOptions, NotificationDeliveryCleanupResult, AgentUpgradeCommand, CreateAgentUpgradeCommandsResult, ExpireAgentUpgradeCommandsResult } from '../types.ts';
 import { redactDatabaseSecrets } from '../../utils/setup-diagnostics.ts';
 import { generateAgentToken, hashAgentToken } from '../../utils/client.ts';
 import { scheduledFetch } from '../../utils/scheduled-budget.ts';
@@ -1189,4 +1189,69 @@ export function trySupabaseClaimAuditThrottle(
     input_now: now,
     input_throttle_ms: throttleMs,
   });
+}
+
+/* ----------------------------------------------------------------------------
+ * Agent 一键升级命令 RPC 封装（T03）
+ * -------------------------------------------------------------------------- */
+
+export function createAgentUpgradeCommands(
+  env: SupabaseApiEnv,
+  clientUuids: string[],
+  targetVersion: string,
+  requestedBy: string,
+): Promise<CreateAgentUpgradeCommandsResult> {
+  return callSupabaseRpc<CreateAgentUpgradeCommandsResult>(
+    env,
+    'cfm_create_agent_upgrade_commands',
+    {
+      input: {
+        client_uuids: clientUuids,
+        target_version: targetVersion,
+        requested_by: requestedBy,
+      },
+    },
+  );
+}
+
+export function fetchAgentUpgradeTasksForClient(
+  env: SupabaseApiEnv,
+  clientUuid: string,
+  nowIso: string,
+): Promise<AgentUpgradeCommand[]> {
+  return callSupabaseRpc<AgentUpgradeCommand[]>(
+    env,
+    'cfm_agent_upgrade_tasks',
+    { input_client: clientUuid, input_now: nowIso, input_limit: 1 },
+  );
+}
+
+export function recordAgentUpgradeResult(
+  env: SupabaseApiEnv,
+  result: Record<string, unknown>,
+): Promise<{ ok: boolean; status?: string; reason?: string; idempotent?: boolean; final_version?: string | null }> {
+  return callSupabaseRpc(env, 'cfm_record_agent_upgrade_result', { input: result });
+}
+
+export function listAgentUpgradeCommands(
+  env: SupabaseApiEnv,
+  options: { ids?: string[]; clientUuids?: string[]; limit?: number },
+): Promise<AgentUpgradeCommand[]> {
+  const input: Record<string, unknown> = {};
+  if (options.ids && options.ids.length > 0) input.ids = options.ids;
+  if (options.clientUuids && options.clientUuids.length > 0) input.client_uuids = options.clientUuids;
+  if (typeof options.limit === 'number') input.limit = options.limit;
+  return callSupabaseRpc<AgentUpgradeCommand[]>(env, 'cfm_list_agent_upgrade_commands', { input });
+}
+
+export function expireAgentUpgradeCommands(
+  env: SupabaseApiEnv,
+  nowIso: string,
+  ttlSec: number,
+): Promise<ExpireAgentUpgradeCommandsResult> {
+  return callSupabaseRpc<ExpireAgentUpgradeCommandsResult>(
+    env,
+    'cfm_expire_agent_upgrade_commands',
+    { input_now: nowIso, input_ttl_sec: ttlSec },
+  );
 }

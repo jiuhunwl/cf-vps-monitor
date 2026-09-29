@@ -459,3 +459,75 @@ export interface BoundedTableRowCounts {
   capped: Partial<Record<keyof TableRowCounts, boolean>>;
   limit: number;
 }
+
+/* ============================================================================
+ * Agent 一键升级命令（T03）
+ * 字段与 supabase/migrations/4_rpc_api.sql 的 agent_upgrade_commands 表、
+ * agent/upgrade_state.go 的 upgradeResult / upgradeTask 逐字对齐。
+ * ========================================================================== */
+
+export type AgentUpgradeCommandStatus =
+  | 'queued'
+  | 'dispatched'
+  | 'running'
+  | 'success'
+  | 'already_latest'
+  | 'failed'
+  | 'rolled_back'
+  | 'unverified';
+
+export interface AgentUpgradeCommand {
+  id: string;
+  client_uuid: string;
+  target_version: string;
+  requested_by: string;
+  status: AgentUpgradeCommandStatus;
+  from_version: string | null;
+  final_version: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  created_at: string;
+  dispatched_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+}
+
+/** 下发到 policy 的最小集 —— 只取节点侧需要的两个字段。
+ *  注意：release_base / proxy / ghproxy 由 root 侧安装器 argv 决定，
+ *  Worker 永远不下发这三个字段（否则等于把提权路径开回来）。*/
+export interface AgentUpgradeTask {
+  id: string;
+  target_version: string;
+}
+
+/** 来自 Report.upgrade_results 的回执项，键名与 agent/upgrade_state.go:96 一致。*/
+export interface AgentUpgradeResult {
+  command_id: string;
+  target_version: string;
+  from_version: string;
+  final_version: string;
+  status: 'success' | 'already_latest' | 'rolled_back' | 'failed';
+  failure_code?: string;
+  reason?: string;
+  started_at: number;
+  finished_at: number;
+}
+
+export type AgentUpgradeSkipReason = 'already_latest' | 'already_pending' | 'not_found' | 'invalid_target';
+
+export interface AgentUpgradeSkipped {
+  client_uuid: string;
+  reason: AgentUpgradeSkipReason;
+}
+
+export interface CreateAgentUpgradeCommandsResult {
+  created: number;
+  skipped: AgentUpgradeSkipped[];
+  commands: AgentUpgradeCommand[];
+  invalid_target?: boolean;
+}
+
+export interface ExpireAgentUpgradeCommandsResult {
+  expired: number;
+  reason?: string;
+}

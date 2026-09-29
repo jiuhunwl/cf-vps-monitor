@@ -24,6 +24,7 @@ async function staleSnapshot(kind, action, cold = false) {
     updateClient: async () => {}, insertAuditLog: async () => {},
     getSetting: async () => null, setSetting: async () => {},
     listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    fetchAgentUpgradeTasksForClient: async () => [],
   } });
   const { LiveDataDO } = loader.load('worker/src/do/live-data.ts');
   const object = new LiveDataDO(storage.state, {});

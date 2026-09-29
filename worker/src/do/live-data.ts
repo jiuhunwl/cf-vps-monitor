@@ -71,6 +71,7 @@ const HOT_PATH_HEALTH_OK_THROTTLE_MS = 60 * 60 * 1000;
 const POLICY_SETTING_CACHE_MS = 30_000;
 const PING_TASK_CACHE_MS = 120_000;
 const WEBSITE_PROBE_TASK_CACHE_MS = 120_000;
+const AGENT_UPGRADE_TASK_CACHE_MS = 30_000;  // 高频心跳路径，缓存窗口短但不为 0
 const AGENT_POLICY_OPTIONAL_ERROR_THROTTLE_MS = 5 * 60 * 1000;
 const RECORD_CAPACITY_SNAPSHOT_KEY = 'record:capacity:snapshot';
 const AGENT_POLICY_SETTING_KEYS = [
@@ -166,6 +167,9 @@ interface AgentPolicyMessage {
   // 只有在后台确实存有该节点的重置日时才下发；缺省时探针保留自己的
   // --traffic-reset-day / 环境变量取值，不会被一个「默认 1」悄悄改掉。
   traffic_reset_day?: number;
+  // 面板下发的升级命令（每节点至多 1 条未决）。release_base/proxy/ghproxy 由
+  // 安装器 root 侧 argv 决定，Worker 永远不下发这三个字段。
+  upgrade_tasks?: db.AgentUpgradeTask[];
   timestamp: number;
 }
 
@@ -449,6 +453,9 @@ export class LiveDataDO {
   private pingTasksPending: Promise<db.PingTask[]> | null = null;
   private websiteProbeTasksCache: Map<string, { value: db.WebsiteMonitor[]; expiresAt: number }> = new Map();
   private websiteProbeTasksPending: Map<string, Promise<db.WebsiteMonitor[]>> = new Map();
+  // 升级命令按节点分桶缓存（高频心跳路径，绝不能每次同步打 RPC）
+  private agentUpgradeTasksCache: Map<string, { value: db.AgentUpgradeCommand[]; expiresAt: number }> = new Map();
+  private agentUpgradeTasksPending: Map<string, Promise<db.AgentUpgradeCommand[]>> = new Map();
   private policyOptionalErrorLastWriteAt: Map<string, number> = new Map();
   private adminClientsUpdatedAt: number | null = null;
   private adminClientsSnapshot: AdminClientsSnapshot | null = null;
@@ -1176,6 +1183,56 @@ export class LiveDataDO {
     }
   }
 
+  /** 取某节点的未决升级命令（至多 1 条），带短 TTL 缓存。
+   *  高频心跳路径必经此函数 —— 不缓存会打爆 DO 子请求预算。失败降级为空数组
+   *  （不让升级查询失败影响主 policy 下发）。*/
+  private async getAgentUpgradeTasksForClient(now: number, clientId?: string): Promise<db.AgentUpgradeCommand[]> {
+    const database = this.getQueryDatabase();
+    if (!database || !clientId) return [];
+    const cached = this.agentUpgradeTasksCache.get(clientId);
+    if (cached && cached.expiresAt > now) return cached.value;
+    const existing = this.agentUpgradeTasksPending.get(clientId);
+    if (existing) return existing;
+
+    const pending = db.fetchAgentUpgradeTasksForClient(database, clientId, new Date(now).toISOString())
+      .then((tasks) => {
+        this.agentUpgradeTasksCache.set(clientId, {
+          value: tasks,
+          expiresAt: now + AGENT_UPGRADE_TASK_CACHE_MS,
+        });
+        return tasks;
+      });
+    this.agentUpgradeTasksPending.set(clientId, pending);
+    try {
+      return await pending;
+    } catch (error) {
+      const previous = this.policyOptionalErrorLastWriteAt.get('agent_policy') || 0;
+      if (now - previous >= AGENT_POLICY_OPTIONAL_ERROR_THROTTLE_MS) {
+        this.policyOptionalErrorLastWriteAt.set('agent_policy', now);
+        await bestEffortRecordHealthEvent(
+          database,
+          'agent_policy',
+          'error',
+          `agent upgrade tasks lookup failed; policy sent without upgrade tasks: ${errorDetail(error)}`,
+          { auditAction: 'agent_policy_upgrade_tasks_error' },
+        );
+      }
+      return [];
+    } finally {
+      if (this.agentUpgradeTasksPending.get(clientId) === pending) {
+        this.agentUpgradeTasksPending.delete(clientId);
+      }
+    }
+  }
+
+  /** 把节点未决命令转成下发最小集（只含 id + target_version，绝不带下载来源）。*/
+  private async upgradeTasksForPolicy(now: number, clientId?: string): Promise<db.AgentUpgradeTask[]> {
+    const commands = await this.getAgentUpgradeTasksForClient(now, clientId);
+    if (commands.length === 0) return [];
+    const cmd = commands[0];
+    return [{ id: cmd.id, target_version: cmd.target_version }];
+  }
+
   private activeViewerCount(now: number): number {
     let count = 0;
     for (const [id, role] of this.sessionRoles) {
@@ -1220,6 +1277,7 @@ export class LiveDataDO {
     const mode: AgentPolicyMode = viewerCount > 0 ? 'active' : 'idle';
     const pingTasks = this.pingTasksForClient(await this.getPingTasks(now), clientId);
     const websiteProbeTasks = await this.getWebsiteProbeTasks(now, clientId);
+    const upgradeTasks = await this.upgradeTasksForPolicy(now, clientId);
     return {
       type: 'policy',
       mode,
@@ -1235,6 +1293,7 @@ export class LiveDataDO {
       policy_ttl_sec: mode === 'active' ? 30 : 120,
       idle_policy_ttl_sec: 120,
       traffic_reset_day: await this.trafficResetDayFor(clientId),
+      upgrade_tasks: upgradeTasks.length > 0 ? upgradeTasks : undefined,
       timestamp: now,
     };
   }

@@ -31,6 +31,7 @@ async function fixture({ overrides = {} } = {}) {
     // 否则拿到的只是「cookie 无效」这个平凡结论。
     getUserByUuid: async () => null,
     listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    fetchAgentUpgradeTasksForClient: async () => [],
     ...overrides,
   };
   const loader = createWorkerLoader({ db, expose: {
