@@ -124,6 +124,35 @@ test('CFVM-004: credential DB failure leaves an existing connection intact', asy
   await f.state.drain();
 });
 
+for (const closeFails of [false, true]) {
+  test(`CFVM-004: restore retires Agent authority before ${closeFails ? 'a failed' : 'a successful'} close`, async () => {
+    const f = fixture({ closeFails });
+    assert.equal((await f.connect()).status, 101);
+    await f.state.drain();
+    const socket = f.pairs[0].server.ws;
+    assert.equal(socket.deserializeAttachment().agentAuthVersion, 1);
+    const close = socket.close;
+    let observedClose;
+    socket.close = (code, reason) => {
+      observedClose ??= { code, reason, agentAuthVersion: socket.deserializeAttachment().agentAuthVersion };
+      return close(code, reason);
+    };
+
+    const restored = await f.object.fetch(new Request('https://do/clients-restore', {
+      method: 'POST', body: JSON.stringify({ clients: [{ uuid: ID, name: 'Restored node', hidden: false }] }),
+    }));
+    assert.equal(restored.status, 200);
+    assert.deepEqual(observedClose, { code: 1008, reason: 'Client configuration restored', agentAuthVersion: 0 });
+    assert.equal(socket.deserializeAttachment().agentAuthVersion, 0);
+    assert.equal(f.object.sessions.has(ID), false);
+    await f.object.webSocketMessage(socket, JSON.stringify({ type: 'report', data: { cpu: 1 } }));
+    assert.equal(f.control.messages, 0, 'a pre-restore connection cannot dispatch reports after revocation');
+    const recovered = new f.LiveDataDO(f.state.state, {});
+    assert.equal(recovered.sessions.has(ID), false, 'hibernation recovery cannot revive the retired connection');
+    await f.state.drain();
+  });
+}
+
 test('CFVM-004: restore invalidates an authorization result obtained before the restore', async () => {
   const f = fixture();
   const started = deferred(), release = deferred();

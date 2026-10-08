@@ -2210,7 +2210,7 @@ export class LiveDataDO {
       for (const socket of new Set([...this.sessions.values(), ...this.state.getWebSockets()])) {
         const attachment = this.getSessionAttachment(socket);
         if (attachment?.role !== 'agent') continue;
-        this.retireAgentSession(socket, attachment);
+        this.retireAgentSession(socket, attachment, 1008, 'Client configuration restored');
         this.sessions.delete(attachment.clientId);
         this.sessionRoles.delete(attachment.clientId);
       }

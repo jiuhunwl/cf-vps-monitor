@@ -63,7 +63,7 @@ test('the authenticated ordinary HTTP route fails an unpersisted report and acce
   fail = false;
   const accepted = await send(24);
   assert.equal(accepted.status, 200);
-  assert.deepEqual(await accepted.json(), { success: true, persisted: false });
+  assert.deepEqual(await accepted.json(), { success: true, persisted: false, accepted_upgrade_ids: [] });
   assert.equal(state.values.get('http-live:node').lastReport.cpu, 24);
   await state.drain();
 });
