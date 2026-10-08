@@ -9,13 +9,26 @@ const fromMiniflare = createRequire(import.meta.resolve('miniflare'));
 const sharp = fromMiniflare('sharp');
 const { gte } = createRequire(fromMiniflare.resolve('sharp'))('semver');
 
-test('V-S01 Miniflare loads a Sharp release patched for GHSA-rgj7-g3m4-5g8c', t => {
-  t.diagnostic(`loaded Sharp ${sharp.versions.sharp}, libheif ${sharp.versions.heif}, libvips ${sharp.versions.vips}`);
-  assert.ok(gte(sharp.versions.sharp, '0.35.4'), 'the loaded Sharp release must include the upstream security patch');
+test('V-S01 Miniflare loads Sharp patched for the HEIF and SVG advisories', t => {
+  t.diagnostic(`loaded Sharp ${sharp.versions.sharp}, libheif ${sharp.versions.heif}, librsvg ${sharp.versions.rsvg}, libvips ${sharp.versions.vips}`);
+  assert.ok(gte(sharp.versions.sharp, '0.35.5'), 'the loaded Sharp release must include both upstream security patches');
 });
 
 test('V-S01 the actual loaded native libheif includes the advisory fix', () => {
   assert.ok(gte(sharp.versions.heif, '1.23.2'), 'changing only the JavaScript package must not leave vulnerable native binaries');
+});
+
+test('V-S02 the actual loaded librsvg includes the GHSA-wq5f-xc86-pv6w fix', () => {
+  assert.ok(gte(sharp.versions.rsvg, '2.63.2'), 'the actual SVG decoder must be patched, including globally installed native libraries');
+});
+
+test('V-S02 the patched native SVG renderer still preserves a bounded synthetic image', async () => {
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="6" height="4"><rect width="6" height="4" fill="white"/></svg>');
+  const png = await sharp(svg).resize(3, 2).png().toBuffer();
+  const metadata = await sharp(png).metadata();
+  assert.deepEqual({ format: metadata.format, width: metadata.width, height: metadata.height },
+    { format: 'png', width: 3, height: 2 });
+  assert.deepEqual(await sharp(png).ensureAlpha().raw().toBuffer(), Buffer.alloc(3 * 2 * 4, 255));
 });
 
 test('V-S01 native workerd Images still decodes and resizes a synthetic AVIF', { timeout: 30000 }, async t => {
