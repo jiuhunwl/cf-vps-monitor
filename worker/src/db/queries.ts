@@ -32,12 +32,12 @@ export async function getClientsByIds(database: QueryDatabase, uuids: string[]):
   return sba.getSupabaseClientsByIds(database.env, uuids);
 }
 
-export async function getClientByToken(database: QueryDatabase, token: string, _fresh = false): Promise<t.Client | null> {
-  return sba.getSupabaseClientByToken(database.env, token);
+export async function getClientByToken(database: QueryDatabase, token: string, _fresh = false, signal?: AbortSignal): Promise<t.Client | null> {
+  return sba.getSupabaseClientByToken(database.env, token, signal);
 }
 
-export async function getClientIdentityByToken(database: QueryDatabase, token: string, _fresh = false): Promise<t.ClientIdentity | null> {
-  return sba.getSupabaseClientIdentityByToken(database.env, token);
+export async function getClientIdentityByToken(database: QueryDatabase, token: string, _fresh = false, signal?: AbortSignal): Promise<t.ClientIdentity | null> {
+  return sba.getSupabaseClientIdentityByToken(database.env, token, signal);
 }
 
 export async function clientTokenExists(database: QueryDatabase, token: string): Promise<boolean> {
@@ -775,9 +775,10 @@ export async function fetchAgentUpgradeTasksForClient(
 
 export async function recordAgentUpgradeResult(
   database: QueryDatabase,
-  result: t.AgentUpgradeResult,
+  result: t.AgentUpgradeResult & { client_uuid: string; reported_at: string },
+  signal?: AbortSignal,
 ): Promise<{ ok: boolean; status?: string; reason?: string; idempotent?: boolean }> {
-  return sba.recordAgentUpgradeResult(database.env, result as unknown as Record<string, unknown>);
+  return sba.recordAgentUpgradeResult(database.env, result as unknown as Record<string, unknown>, signal);
 }
 
 export async function listAgentUpgradeCommands(

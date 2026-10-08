@@ -286,6 +286,7 @@ function Join-GitHubProxy {
   if ([string]::IsNullOrWhiteSpace($InstallGhproxy)) {
     return $Url
   }
+  Assert-HttpsUrl -Name "-InstallGhproxy" -Url $InstallGhproxy
   return $InstallGhproxy.TrimEnd("/") + "/" + $Url
 }
 
@@ -295,8 +296,12 @@ function Assert-HttpsUrl {
     [string]$Name,
     [string]$Url
   )
-  if (-not [string]::IsNullOrWhiteSpace($Url) -and -not $Url.StartsWith("https://", [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "$Name must use an https:// URL."
+  if ([string]::IsNullOrWhiteSpace($Url)) { return }
+  $uri = $null
+  if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri) -or
+      $uri.Scheme -ne "https" -or [string]::IsNullOrWhiteSpace($uri.Host) -or
+      -not [string]::IsNullOrWhiteSpace($uri.UserInfo)) {
+    throw "$Name must use an https:// URL without credentials."
   }
 }
 
@@ -334,21 +339,57 @@ function Invoke-DownloadFile {
     [string]$OutFile
   )
 
+  Assert-HttpsUrl -Name "Download URL" -Url $Url
   if ($DryRun) {
     $proxyText = if ([string]::IsNullOrWhiteSpace($Proxy)) { "" } else { " -Proxy `"$Proxy`"" }
-    Write-Host "[dry-run] Invoke-WebRequest $Url$proxyText -OutFile `"$OutFile`""
+    Write-Host "[dry-run] HTTPS-only download $Url$proxyText -OutFile `"$OutFile`""
     return
   }
 
-  $downloadParams = @{
-    Uri = $Url
-    UseBasicParsing = $true
-    OutFile = $OutFile
-  }
+  # Explicit per-hop validation also works on Windows PowerShell 5.1.
+  Add-Type -AssemblyName System.Net.Http
+  $handler = [System.Net.Http.HttpClientHandler]::new()
+  $handler.AllowAutoRedirect = $false
   if (-not [string]::IsNullOrWhiteSpace($Proxy)) {
-    $downloadParams.Proxy = $Proxy
+    $handler.Proxy = [System.Net.WebProxy]::new($Proxy)
   }
-  Invoke-WebRequest @downloadParams
+  $client = [System.Net.Http.HttpClient]::new($handler)
+  $client.Timeout = [TimeSpan]::FromMinutes(5)
+  $client.DefaultRequestHeaders.UserAgent.ParseAdd("cf-vps-monitor-installer")
+  $timeout = [System.Threading.CancellationTokenSource]::new()
+  $timeout.CancelAfter([TimeSpan]::FromMinutes(5))
+  try {
+    $current = [Uri]$Url
+    for ($hop = 0; $hop -lt 10; $hop++) {
+      Assert-HttpsUrl -Name "Download redirect" -Url $current.AbsoluteUri
+      $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $current)
+      $response = $null
+      try {
+        $response = $client.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $timeout.Token).GetAwaiter().GetResult()
+        if ([int]$response.StatusCode -in @(301, 302, 303, 307, 308)) {
+          if ($null -eq $response.Headers.Location) { throw "Download redirect has no Location." }
+          $current = [Uri]::new($current, $response.Headers.Location)
+          continue
+        }
+        $null = $response.EnsureSuccessStatusCode()
+        $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        try {
+          $outputStream = [IO.File]::Open($OutFile, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+          try {
+            $inputStream.CopyToAsync($outputStream, 81920, $timeout.Token).GetAwaiter().GetResult()
+          } finally { $outputStream.Dispose() }
+        } finally { $inputStream.Dispose() }
+        return
+      } finally {
+        if ($null -ne $response) { $response.Dispose() }
+        $request.Dispose()
+      }
+    }
+    throw "Too many download redirects."
+  } finally {
+    $timeout.Dispose()
+    $client.Dispose()
+  }
 }
 
 function New-AgentTemporaryDirectory {
@@ -764,6 +805,7 @@ Assert-HttpsUrl -Name "-ChecksumUrl" -Url $ChecksumUrl
 Assert-HttpsUrl -Name "-SourceUrl" -Url $SourceUrl
 $Proxy = Normalize-HttpUrl -Name "-Proxy" -Url $Proxy -AllowPath $false
 $InstallGhproxy = Normalize-HttpUrl -Name "-InstallGhproxy" -Url $InstallGhproxy
+Assert-HttpsUrl -Name "-InstallGhproxy" -Url $InstallGhproxy
 
 if ($BinaryPath -eq "" -and $BinaryUrl -eq "" -and -not $BuildFromSource) {
   $BinaryUrl = Get-DefaultBinaryUrl

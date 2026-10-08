@@ -117,7 +117,7 @@ type agentHealth struct {
 	ReportedAtMs int64  `json:"reported_at"`
 }
 
-// upgradeStateDir resolves the directory holding the request/result/health/lock
+// upgradeStateDir resolves the directory holding the request/result/health
 // files. It mirrors trafficResetStatePath so the beacon lands beside the traffic
 // state file the installer already manages.
 func upgradeStateDir() string {
@@ -269,7 +269,8 @@ func writeAgentHealth(path string, health agentHealth) error {
 // started_at. It is captured once at package init.
 var processStartedAtMs = time.Now().UnixMilli()
 
-// upgradeLock is an advisory cross-process lock over $STATE_DIR/upgrade.lock.
+// upgradeLock is a supervisor singleton lock. Privileged Unix locks live in
+// the protected installation directory; other platforms retain state storage.
 type upgradeLock struct {
 	handle *os.File
 	path   string
@@ -277,12 +278,11 @@ type upgradeLock struct {
 
 // acquireUpgradeLock takes the upgrade lock without blocking. A nil lock with a
 // nil error cannot happen; callers always get either a held lock or an error.
-func acquireUpgradeLock(stateDir string) (*upgradeLock, error) {
-	if stateDir == "" {
+func acquireUpgradeLock(options upgradeOptions) (*upgradeLock, error) {
+	if options.stateDir == "" {
 		return nil, errors.New("state directory is unset")
 	}
-	path := stateFile(stateDir, upgradeLockFile)
-	handle, err := lockUpgradeFile(path)
+	handle, path, err := platformAcquireUpgradeLock(options)
 	if err != nil {
 		return nil, err
 	}

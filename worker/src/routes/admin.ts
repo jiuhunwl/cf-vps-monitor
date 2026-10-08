@@ -534,11 +534,12 @@ async function removeLiveClient(c: AdminContext, uuid: string): Promise<void> {
 
 async function disconnectLiveClient(c: AdminContext, uuid: string): Promise<void> {
   const stub = liveDataStub(c);
-  await stub.fetch(new Request('https://do/client-remove', {
+  const response = await stub.fetch(new Request('https://do/client-remove', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ uuid, keepMetadata: true }),
   }));
+  if (!response.ok) throw new Error(`Agent disconnect failed: HTTP ${response.status}`);
 }
 
 export async function getClientCreateConflict(database: db.QueryDatabase, uuid: string, token: string): Promise<'uuid' | 'token' | null> {
@@ -1683,6 +1684,8 @@ adminRoutes.post('/clients/:uuid/token/rotate', async (c) => {
   }
 
   const updatedClient = await db.rotateClientToken(database, uuid, token);
+  if (!updatedClient) return c.json({ success: false, code: 'AGENT_TOKEN_ROTATION_UNCONFIRMED',
+    error: '未能确认客户端令牌更新，请刷新后重试' }, 409);
   invalidateAdminClientsCache();
   invalidateAdminPublicMetadata(c);
   invalidateAgentClientAuthCache(client);
@@ -1691,7 +1694,15 @@ adminRoutes.post('/clients/:uuid/token/rotate', async (c) => {
   // uuid 索引去删快照的 —— 一旦授新先落地，索引就指向新 hash，撤旧便删不掉旧凭据。
   // DO 侧已改成与调用顺序无关地回收孤儿快照（upsertAgentAuthSnapshot），这里再固定顺序，
   // 是为了让「断开旧连接」一定发生在「下发新凭据」之前，且两者失败互不掩盖。
-  await disconnectLiveClient(c, uuid).catch(() => undefined);
+  try {
+    await disconnectLiveClient(c, uuid);
+  } catch {
+    // The database commit cannot be rolled back here. Never label an
+    // unconfirmed disconnect as successful revocation.
+    await db.insertAuditLog(database, c.get('username')!, 'client_token_revocation_pending', `Token changed but session revocation is unconfirmed: ${uuid}`, 'error').catch(() => undefined);
+    return c.json({ success: false, code: 'AGENT_TOKEN_REVOCATION_PENDING', token_rotated: true,
+      error: '令牌已更新，但旧连接撤销尚未确认；请重试轮换并检查服务状态' }, 503);
+  }
   if (updatedClient) await syncAgentAuthClient(c, updatedClient).catch(() => undefined);
   await purgeAdminClientsEdgeCache(c);
   await db.insertAuditLog(database, c.get('username')!, 'client_token_rotate', `重置客户端 Token: ${client.name || uuid}`);

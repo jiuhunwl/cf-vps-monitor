@@ -334,6 +334,9 @@ func resolveLatestReleaseTag(options upgradeOptions) (string, error) {
 	if options.ghProxy != "" {
 		raw = options.ghProxy + "/" + raw
 	}
+	if err := validateUpgradeDownloadURL(raw); err != nil {
+		return "", err
+	}
 	client := &http.Client{
 		Timeout: 20 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -369,7 +372,7 @@ func resolveLatestReleaseTag(options upgradeOptions) (string, error) {
 
 // upgradeTransport builds an HTTP transport that honours an explicit proxy while
 // otherwise falling back to the ambient environment.
-func upgradeTransport(proxy string) http.RoundTripper {
+var upgradeTransport = func(proxy string) http.RoundTripper {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
 	if proxy != "" {
 		if parsed, err := url.Parse(proxy); err == nil {
@@ -379,9 +382,29 @@ func upgradeTransport(proxy string) http.RoundTripper {
 	return transport
 }
 
+// validateUpgradeDownloadURL allows signed HTTPS redirects, but never credentials
+// or a protocol downgrade. Configuration URLs have separate stricter validation.
+func validateUpgradeDownloadURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil {
+		return errors.New("upgrade download must use an https:// URL without credentials")
+	}
+	return nil
+}
+
+func upgradeDownloadRedirect(request *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("too many upgrade download redirects")
+	}
+	return validateUpgradeDownloadURL(request.URL.String())
+}
+
 // downloadToFile streams a URL to a local path using the shared transport.
 func downloadToFile(rawURL, destination string, options upgradeOptions) error {
-	client := &http.Client{Timeout: 5 * time.Minute, Transport: upgradeTransport(options.proxy)}
+	if err := validateUpgradeDownloadURL(rawURL); err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 5 * time.Minute, Transport: upgradeTransport(options.proxy), CheckRedirect: upgradeDownloadRedirect}
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
@@ -877,7 +900,7 @@ func (m *upgradeManager) refreshResultFile() {
 		return
 	}
 	result, err := readUpgradeResult(stateDir)
-	if err != nil || strings.TrimSpace(result.CommandID) == "" || result.Status == "" {
+	if err != nil || strings.TrimSpace(result.CommandID) == "" || strings.HasPrefix(result.CommandID, "cli-") || result.Status == "" {
 		return
 	}
 	m.mu.Lock()
@@ -906,35 +929,13 @@ func (m *upgradeManager) snapshot() []upgradeResult {
 	if len(m.pending) == 0 {
 		return nil
 	}
-	out := make([]upgradeResult, len(m.pending))
+	out := make([]upgradeResult, min(len(m.pending), maxUpgradeResultsPerEnvelope))
 	copy(out, m.pending)
 	return out
 }
 
-// acknowledge drops reported results and removes the consumed result file.
-func (m *upgradeManager) acknowledge() {
-	m.mu.Lock()
-	m.pending = nil
-	result, err := readUpgradeResult(upgradeStateDir())
-	consumed := err == nil && m.reportedIDs[result.CommandID] && strings.TrimSpace(result.CommandID) != ""
-	m.mu.Unlock()
-	if consumed {
-		_ = removeUpgradeResult(upgradeStateDir())
-	}
-}
-
-// attachUpgradeResults stamps pending upgrade results onto the first report of a
-// batch. Safe to call when there is nothing pending.
-func attachUpgradeResults(reports []Report) {
-	if len(reports) == 0 {
-		return
-	}
-	results := upgradeRuntime.snapshot()
-	if len(results) == 0 {
-		return
-	}
-	reports[0].UpgradeResults = results
-}
+// The latest disk result is intentionally retained for restart/idempotent
+// replay. Acknowledging one upload must not unlink a newer supervisor result.
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {

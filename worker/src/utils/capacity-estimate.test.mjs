@@ -153,7 +153,7 @@ test('the snapshot write estimate agrees with actual accepted WebSocket messages
     listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
   } }).load('worker/src/do/live-data.ts');
   const object = new LiveDataDO(state.state, {});
-  const socket = createSocket({ role: 'agent', clientId: 'node', clientName: 'Fixture', hidden: false });
+  const socket = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: 'node', clientName: 'Fixture', hidden: false });
   object.registerSession(socket.ws, socket.ws.deserializeAttachment());
   for (const cpu of [1, 2, 3]) await object.webSocketMessage(socket.ws, JSON.stringify({ type: 'report', data: { cpu } }));
   await object.webSocketMessage(socket.ws, JSON.stringify({ type: 'reports', reports: [{ cpu: 4 }, { cpu: 5 }, { cpu: 6 }] }));

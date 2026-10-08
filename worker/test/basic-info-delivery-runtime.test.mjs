@@ -52,7 +52,7 @@ test('R-A05 basic-information delivery is acknowledged only after the real SQL u
     await t.test(`WebSocket ${type} retains basic info on error and acknowledges a persisted retry`, async () => {
       const namespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
       const stub = namespace.get(namespace.idFromName(`basic-info-${type}`));
-      const upgraded = await stub.fetch('https://do/?role=agent&id=basic-info-node&name=Synthetic', { headers: { Upgrade: 'websocket' } });
+      const upgraded = await stub.fetch('https://do/?role=agent&id=basic-info-node&name=Synthetic', { headers: { Upgrade: 'websocket', Authorization: `Bearer ${token}` } });
       assert.equal(upgraded.status, 101);
       const ws = upgraded.webSocket;
       ws.accept();

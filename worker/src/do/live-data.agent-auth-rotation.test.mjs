@@ -54,6 +54,7 @@ async function fixture() {
   }));
 
   return {
+    db,
     loader,
     state,
     env,
@@ -95,7 +96,7 @@ test('AUD-08 rotating a client token through the admin route revokes the old Age
   });
 
   const before = await f.clientRoutes.getAgentClientByToken(f.loader.database, OLD_TOKEN, f.env);
-  assert.equal(before?.uuid, UUID, 'precondition: the old credential is served by the DO snapshot, not the database');
+  assert.equal(before?.uuid, UUID, 'precondition: the old credential is currently valid while DO metadata is present');
 
   const response = await f.adminRoutes.fetch(new Request(`https://panel.synthetic.test/clients/${UUID}/token/rotate`, {
     method: 'POST',
@@ -110,4 +111,47 @@ test('AUD-08 rotating a client token through the admin route revokes the old Age
     'the revoked token must stop authenticating as soon as the rotation returns, not only after the Durable Object restarts');
   assert.equal((await f.clientRoutes.getAgentClientByToken(f.loader.database, newToken, f.env))?.uuid, UUID,
     'the freshly issued credential must authenticate');
+});
+
+
+for (const failure of ['network', 'http']) {
+  test(`CFVM-004 token rotation reports partial failure when disconnect ${failure} fails`, async () => {
+    const f = await fixture();
+    const originalGet = f.env.LIVE_DATA.get;
+    f.env.LIVE_DATA.get = id => {
+      const original = originalGet(id);
+      return { fetch: request => {
+        if (new URL(request.url).pathname === '/client-remove') {
+          if (failure === 'network') return Promise.reject(new Error('synthetic disconnect failure'));
+          return Promise.resolve(Response.json({ error: 'synthetic unavailable' }, { status: 503 }));
+        }
+        return original.fetch(request);
+      } };
+    };
+    const response = await f.adminRoutes.fetch(new Request(`https://panel.synthetic.test/clients/${UUID}/token/rotate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    }), f.env, f.executionCtx);
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.success, false);
+    assert.equal(body.code, 'AGENT_TOKEN_REVOCATION_PENDING');
+    assert.equal(body.token_rotated, true, 'database mutation is not misrepresented as rolled back');
+    assert.equal(Object.hasOwn(body, 'token'), false);
+    await f.state.drain();
+  });
+}
+
+
+test('CFVM-004 absent rotation result cannot be reported as a successful token change', async () => {
+  const f = await fixture();
+  f.db.rotateClientToken = async () => null;
+  const response = await f.adminRoutes.fetch(new Request(`https://panel.synthetic.test/clients/${UUID}/token/rotate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  }), f.env, f.executionCtx);
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.success, false);
+  assert.equal(body.code, 'AGENT_TOKEN_ROTATION_UNCONFIRMED');
+  assert.equal(Object.hasOwn(body, 'token'), false);
+  await f.state.drain();
 });

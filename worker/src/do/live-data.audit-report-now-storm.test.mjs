@@ -27,7 +27,7 @@ async function fixture() {
   const object = new LiveDataDO(state.state, {});
 
   // 一个在线的节点会话，用来观察下发到节点的 policy 消息。
-  const agent = createSocket({ role: 'agent', clientId: 'node-a', clientName: 'Node A', hidden: false });
+  const agent = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: 'node-a', clientName: 'Node A', hidden: false });
   object.registerSession(agent.ws, agent.ws.deserializeAttachment());
   // 一位在线的观众，让 mode 判定为 active（否则 report_now 恒为 false，断言会失去意义）。
   const viewer = createSocket({

@@ -38,7 +38,7 @@ test('the authenticated ordinary HTTP route fails an unpersisted report and acce
     return put(key, value);
   };
   const production = createWorkerLoader({ db: {
-    getClientByToken: async () => row, getClient: async () => row,
+    getClientByToken: async () => row, getClientIdentityByToken: async () => structuredClone(row), getClient: async () => row,
     markClientTokenUsed: async () => false, getSettingsByKeys: async () => ({ record_enabled: 'false' }),
     getSetting: async () => null, setSetting: async () => {}, updateClient: async () => {},
     listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],

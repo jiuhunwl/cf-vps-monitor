@@ -16,7 +16,7 @@ async function reportAcrossAdminChange(action, basic) {
   });
   const storage = createDurableState([], [viewer.ws]);
   const loader = createWorkerLoader({ db: {
-    getClientByToken: async () => structuredClone(row), getClient: async () => structuredClone(row),
+    getClientByToken: async () => structuredClone(row), getClientIdentityByToken: async () => structuredClone(row), getClient: async () => structuredClone(row),
     getSettingsByKeys: async () => ({ record_enabled: 'false' }),
     getSetting: async () => null, setSetting: async () => {},
     updateClient: async () => {}, markClientTokenUsed: async () => {},

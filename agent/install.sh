@@ -164,6 +164,7 @@ require_https_url() {
 }
 
 with_github_proxy() {
+  require_https_url "--install-ghproxy" "$INSTALL_GHPROXY"
   url="$1"
   if [ -n "$INSTALL_GHPROXY" ]; then
     printf '%s/%s' "$INSTALL_GHPROXY" "$url"
@@ -175,31 +176,24 @@ with_github_proxy() {
 download_file() {
   url="$1"
   output="$2"
+  require_https_url "download URL" "$url"
   if [ "$DRY_RUN" = "1" ]; then
-    echo "[dry-run] download ${url} to ${output}"
+    echo "[dry-run] HTTPS-only download ${url} to ${output}"
     return 0
   fi
-  if has curl; then
-    if [ -n "$PROXY" ]; then
-      curl -fsSL --retry 3 --proxy "$PROXY" -o "$output" "$url"
-    else
-      curl -fsSL --retry 3 -o "$output" "$url"
-    fi
-  elif has wget; then
-    if [ -n "$PROXY" ]; then
-      http_proxy="$PROXY" https_proxy="$PROXY" wget -O "$output" "$url"
-    else
-      wget -O "$output" "$url"
-    fi
-  elif has fetch; then
-    if [ -n "$PROXY" ]; then
-      HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY" fetch -o "$output" "$url"
-    else
-      fetch -o "$output" "$url"
-    fi
+  has curl || die "curl with HTTPS protocol restrictions is required for secure downloads."
+  download_status=0
+  if [ -n "$PROXY" ]; then
+    curl -fsSL --retry 3 --max-redirs 10 --proto '=https' --proto-redir '=https' --proxy "$PROXY" -o "$output" "$url" || download_status=$?
   else
-    die "curl, wget, or fetch is required to download files."
+    curl -fsSL --retry 3 --max-redirs 10 --proto '=https' --proto-redir '=https' -o "$output" "$url" || download_status=$?
   fi
+  # Only HTTP errors may use the existing source-build fallback. Never retry
+  # protocol, certificate or unsupported-option failures via another path.
+  case "$download_status" in
+    0|22) return "$download_status" ;;
+    *) die "Secure download failed (curl exit $download_status); refusing fallback." ;;
+  esac
 }
 
 sha256_file() {
@@ -1045,6 +1039,15 @@ agent_stop_upgrade_supervisor() {
   fi
 }
 
+# A lock-location migration must not overlap an old resident supervisor.
+agent_quiesce_upgrade_supervisor() {
+  agent_stop_upgrade_supervisor || return 1
+  if [ "${UPGRADE_SUPERVISOR_BLOCKED:-0}" != 0 ]; then
+    printf '%s\n' "Refusing binary replacement: upgrade supervisor ownership could not be verified." >&2
+    return 1
+  fi
+}
+
 agent_remove_upgrade_supervisor() {
   [ "${OS_NAME:-${PLATFORM_OS:-}}" = linux ] && [ "$(id -u)" = 0 ] || return 0
   agent_stop_upgrade_supervisor || return 1
@@ -1232,7 +1235,8 @@ verify_binary_checksum() {
 
 install_root_dependencies() {
   [ "$DRY_RUN" = "1" ] && return 0
-  if has curl || has wget || has fetch; then
+  [ -n "$BINARY" ] && return 0
+  if has curl; then
     return 0
   fi
   if has apk; then
@@ -1435,6 +1439,7 @@ prepare_binary() {
 
 install_systemd() {
   agent_assert_instance 0 || return 1
+  agent_quiesce_upgrade_supervisor || return 1
   agent_load_disk_options || return 1
   agent_stop_disk_collector || return 1
   ensure_agent_user
@@ -1493,6 +1498,7 @@ EOF
 
 install_openrc() {
   agent_assert_instance 0 || return 1
+  agent_quiesce_upgrade_supervisor || return 1
   agent_load_disk_options || return 1
   agent_stop_disk_collector || return 1
   ensure_agent_user
@@ -1976,6 +1982,7 @@ done
 set_release_base
 PROXY="$(normalize_proxy_url "--proxy" "$PROXY")"
 INSTALL_GHPROXY="$(normalize_proxy_url "--install-ghproxy" "$INSTALL_GHPROXY")"
+require_https_url "--install-ghproxy" "$INSTALL_GHPROXY"
 SERVICE_MODE="$(detect_service_mode)"
 apply_defaults
 

@@ -64,12 +64,14 @@ export async function callSupabaseRpc<T>(
   functionName: string,
   body: Record<string, unknown> = {},
   fetcher: typeof fetch = fetch,
+  options: { signal?: AbortSignal } = {},
 ): Promise<T> {
   const { url, key } = readSupabaseConfig(env);
   const response = await scheduledFetch(`${url}/rest/v1/rpc/${encodeURIComponent(functionName)}`, {
     method: 'POST',
     headers: supabaseRpcHeaders(key),
     body: JSON.stringify(body),
+    ...(options.signal ? { signal: options.signal } : {}),
   }, fetcher);
   if (!response.ok) {
     const detail = sanitizeSupabaseDetail(await response.text().catch(() => ''), key);
@@ -202,20 +204,20 @@ export function getSupabaseClientIds(env: SupabaseApiEnv): Promise<string[]> {
   return callSupabaseRpc<string[]>(env, 'cfm_client_ids');
 }
 
-export async function getSupabaseClientByToken(env: SupabaseApiEnv, token: string): Promise<Client | null> {
+export async function getSupabaseClientByToken(env: SupabaseApiEnv, token: string, signal?: AbortSignal): Promise<Client | null> {
   const tokenHash = await hashAgentToken(token);
   return callSupabaseRpc<Client | null>(env, 'cfm_agent_client_by_token', {
     input_token_hash: tokenHash,
     input_token: token,
-  }).then(normalizeClientBooleans);
+  }, fetch, { signal }).then(normalizeClientBooleans);
 }
 
-export async function getSupabaseClientIdentityByToken(env: SupabaseApiEnv, token: string): Promise<ClientIdentity | null> {
+export async function getSupabaseClientIdentityByToken(env: SupabaseApiEnv, token: string, signal?: AbortSignal): Promise<ClientIdentity | null> {
   const tokenHash = await hashAgentToken(token);
   return callSupabaseRpc<ClientIdentity | null>(env, 'cfm_agent_client_identity_by_token', {
     input_token_hash: tokenHash,
     input_token: token,
-  }).then(normalizeClientBooleans);
+  }, fetch, { signal }).then(normalizeClientBooleans);
 }
 
 export async function supabaseClientTokenExists(env: SupabaseApiEnv, token: string): Promise<boolean> {
@@ -1229,8 +1231,9 @@ export function fetchAgentUpgradeTasksForClient(
 export function recordAgentUpgradeResult(
   env: SupabaseApiEnv,
   result: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<{ ok: boolean; status?: string; reason?: string; idempotent?: boolean; final_version?: string | null }> {
-  return callSupabaseRpc(env, 'cfm_record_agent_upgrade_result', { input: result });
+  return callSupabaseRpc(env, 'cfm_record_agent_upgrade_result', { input: result }, fetch, { signal });
 }
 
 export function listAgentUpgradeCommands(

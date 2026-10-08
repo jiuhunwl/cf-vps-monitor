@@ -33,6 +33,13 @@ func moveFileAtomic(source, destination string) error {
 	return windows.MoveFileEx(sourcePtr, destinationPtr, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }
 
+// Windows retains its existing state location and LockFileEx semantics.
+func platformAcquireUpgradeLock(options upgradeOptions) (*os.File, string, error) {
+	path := stateFile(options.stateDir, upgradeLockFile)
+	file, err := lockUpgradeFile(path)
+	return file, path, err
+}
+
 // lockUpgradeFile uses a non-blocking exclusive region lock.
 func lockUpgradeFile(path string) (*os.File, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)

@@ -30,7 +30,8 @@ func startUpgradeReleaseServer(t *testing.T, body []byte, publishedHash string) 
 	mux.HandleFunc("/rel/SHA256SUMS", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "%s  %s\n", publishedHash, asset)
 	})
-	server := httptest.NewServer(mux)
+	server := httptest.NewTLSServer(mux)
+	withUpgradeTLSTransport(t, server)
 	t.Cleanup(server.Close)
 	return server
 }

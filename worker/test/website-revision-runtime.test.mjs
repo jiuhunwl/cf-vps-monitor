@@ -81,7 +81,7 @@ test('R-D03 native Agent and manual-check paths respect website configuration ow
       }, body: JSON.stringify(report) });
       assert.equal(response.status, 200, await response.clone().text());
     } else {
-      const response = await stub.fetch('https://do/?role=agent&id=revision-node&name=Synthetic', { headers: { Upgrade: 'websocket' } });
+      const response = await stub.fetch('https://do/?role=agent&id=revision-node&name=Synthetic', { headers: { Upgrade: 'websocket', Authorization: `Bearer ${agentToken}` } });
       assert.equal(response.status, 101);
       const ws = response.webSocket;
       ws.accept();

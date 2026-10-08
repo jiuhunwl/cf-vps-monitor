@@ -74,7 +74,7 @@ function assertNoRawAddress(value, label) {
 test('AUD-02: all anonymous HTTP and WebSocket live outputs apply the public field boundary', async () => {
   const f = await fixture();
   for (const client of [publicClient, hiddenClient]) {
-    const socket = createSocket({ role: 'agent', clientId: client.uuid, clientName: client.name, hidden: client.hidden, sourceIp });
+    const socket = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: client.uuid, clientName: client.name, hidden: client.hidden, sourceIp });
     f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
     await f.object.webSocketMessage(socket.ws, JSON.stringify({ type: 'report', data: {
       cpu: 4, timestamp: Date.now(), ipv4: privateV4, ipv6: privateV6,
@@ -160,7 +160,7 @@ test('AUD-04: an authenticated administrator session does not change the public 
   }), f.env, f.executionCtx);
 
   for (const client of [publicClient, hiddenClient]) {
-    const socket = createSocket({ role: 'agent', clientId: client.uuid, clientName: client.name, hidden: client.hidden, sourceIp });
+    const socket = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: client.uuid, clientName: client.name, hidden: client.hidden, sourceIp });
     f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
     await f.object.webSocketMessage(socket.ws, JSON.stringify({ type: 'report', data: { cpu: 4, timestamp: Date.now(), ipv4: privateV4, ipv6: privateV6 } }));
   }
@@ -236,7 +236,7 @@ for (const action of ['hide', 'remove', 'rename']) {
         : { uuid: publicClient.uuid, name: updated.name, hidden: updated.hidden, client: updated }),
     }));
     const before = f.viewers[0].messages.length;
-    const agent = createSocket({ role: 'agent', clientId: publicClient.uuid, clientName: publicClient.name, hidden: false });
+    const agent = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: publicClient.uuid, clientName: publicClient.name, hidden: false });
     f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
     await f.object.webSocketMessage(agent.ws, JSON.stringify({ type: 'report', data: { cpu: 6 } }));
     await f.storage.drain();

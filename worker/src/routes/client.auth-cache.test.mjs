@@ -7,5 +7,9 @@ assert.match(source, /export const AGENT_AUTH_CACHE_MS = 120_000;/);
 assert.match(source, /const AGENT_TOKEN_USAGE_CACHE_MS = 15 \* 60_000;/);
 assert.match(source, /export function invalidateAgentClientAuthCache/);
 assert.match(source, /markAgentTokenUsedIfDue/);
-assert.match(source, /setAgentAuthCache\(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now\);/);
-assert.match(source, /setAgentAuthCache\(agentIdentityAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now\);/);
+// Cache structure is metadata-only; behavioral authorization regressions live
+// in client.http-revocation.test.mjs rather than asserting cached authority.
+assert.match(source, /cacheAgentMetadata/);
+assert.doesNotMatch(source, /agentIdentityAuthCache|AGENT_AUTH_NEGATIVE_CACHE_MS/);
+assert.match(source, /identity\.uuid/);
+assert.match(source, /full\.uuid !== identity\.uuid/);

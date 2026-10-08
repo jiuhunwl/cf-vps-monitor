@@ -145,6 +145,7 @@ with_github_proxy() {
   local url="$1"
   local proxy
   proxy="$(normalize_proxy_url "--install-ghproxy" "$INSTALL_GHPROXY")"
+  require_https_url "--install-ghproxy" "$proxy"
   if [[ -n "$proxy" ]]; then
     printf '%s/%s' "$proxy" "$url"
   else
@@ -155,45 +156,25 @@ with_github_proxy() {
 download_file() {
   local url="$1"
   local output="$2"
+  require_https_url "download URL" "$url"
   if [[ "$DRY_RUN" == "1" ]]; then
-    if command -v curl >/dev/null 2>&1; then
-      local curl_args=(-fsSL --retry 3 -o "$output")
-      if [[ -n "$PROXY" ]]; then
-        curl_args+=(--proxy "$PROXY")
-      fi
-      printf '[dry-run] curl'
-      printf ' %q' "${curl_args[@]}" "$url"
-      printf '\n'
-    elif command -v wget >/dev/null 2>&1; then
-      local wget_args=(-O "$output")
-      if [[ -n "$PROXY" ]]; then
-        wget_args+=(--execute "use_proxy=yes" --execute "http_proxy=$PROXY" --execute "https_proxy=$PROXY")
-      fi
-      printf '[dry-run] wget'
-      printf ' %q' "${wget_args[@]}" "$url"
-      printf '\n'
-    else
-      echo "[dry-run] download \"$url\" to \"$output\""
-    fi
+    printf '[dry-run] HTTPS-only download %s to %s\n' "$url" "$output"
     return
   fi
-
-  if command -v curl >/dev/null 2>&1; then
-    local curl_args=(-fsSL --retry 3 -o "$output")
-    if [[ -n "$PROXY" ]]; then
-      curl_args+=(--proxy "$PROXY")
-    fi
-    curl "${curl_args[@]}" "$url"
-  elif command -v wget >/dev/null 2>&1; then
-    local wget_args=(-O "$output")
-    if [[ -n "$PROXY" ]]; then
-      wget_args+=(--execute "use_proxy=yes" --execute "http_proxy=$PROXY" --execute "https_proxy=$PROXY")
-    fi
-    wget "${wget_args[@]}" "$url"
-  else
-    echo "curl or wget is required to download files." >&2
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl with HTTPS protocol restrictions is required for secure downloads." >&2
     exit 1
   fi
+  local curl_args=(-fsSL --retry 3 --max-redirs 10 --proto '=https' --proto-redir '=https' -o "$output")
+  if [[ -n "$PROXY" ]]; then
+    curl_args+=(--proxy "$PROXY")
+  fi
+  local download_status=0
+  curl "${curl_args[@]}" "$url" || download_status=$?
+  case "$download_status" in
+    0|22) return "$download_status" ;;
+    *) echo "Secure download failed (curl exit $download_status); refusing fallback." >&2; exit 1 ;;
+  esac
 }
 
 resolve_build_dir() {
@@ -1109,6 +1090,15 @@ agent_stop_upgrade_supervisor() {
   fi
 }
 
+# A lock-location migration must not overlap an old resident supervisor.
+agent_quiesce_upgrade_supervisor() {
+  agent_stop_upgrade_supervisor || return 1
+  if [ "${UPGRADE_SUPERVISOR_BLOCKED:-0}" != 0 ]; then
+    printf '%s\n' "Refusing binary replacement: upgrade supervisor ownership could not be verified." >&2
+    return 1
+  fi
+}
+
 agent_remove_upgrade_supervisor() {
   [ "${OS_NAME:-${PLATFORM_OS:-}}" = linux ] && [ "$(id -u)" = 0 ] || return 0
   agent_stop_upgrade_supervisor || return 1
@@ -1376,6 +1366,7 @@ fi
 
 PROXY="$(normalize_proxy_url "--proxy" "$PROXY")"
 INSTALL_GHPROXY="$(normalize_proxy_url "--install-ghproxy" "$INSTALL_GHPROXY")"
+require_https_url "--install-ghproxy" "$INSTALL_GHPROXY"
 
 if [[ -n "$BINARY" ]]; then
   if [[ ! -f "$BINARY" ]]; then
@@ -1442,6 +1433,7 @@ if [[ -z "$WORK_BIN" && "$BUILD_FROM_SOURCE" == "1" ]]; then
 fi
 
 if ! is_macos; then
+  agent_quiesce_upgrade_supervisor || exit 1
   agent_load_disk_options || exit 1
   agent_stop_disk_collector || exit 1
   ensure_agent_user

@@ -67,7 +67,7 @@ test('V-W01: actual probe delivery acknowledges only accepted data and retries S
 
   for (const format of ['report', 'reports']) await t.test(`WebSocket ${format} ACK waits for the probe insert`, async () => {
     const stub = await getStub(`probe-ws-delay-${format}`);
-    const upgraded = await stub.fetch('https://do/?role=agent&id=probe-node&name=Synthetic', { headers: { Upgrade: 'websocket' } });
+    const upgraded = await stub.fetch('https://do/?role=agent&id=probe-node&name=Synthetic', { headers: { Upgrade: 'websocket', Authorization: `Bearer ${token}` } });
     assert.equal(upgraded.status, 101);
     const ws = upgraded.webSocket;
     ws.accept();

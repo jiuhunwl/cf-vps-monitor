@@ -11,6 +11,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 - **Ping 监控**：支持 ICMP、TCP、HTTP Ping 任务，可分配到全部节点或指定节点，并展示延迟历史。
 - **网站监控**：支持 HTTP/HTTPS GET、HTTP/HTTPS HEAD 和 TCP 检测，支持期望状态码、超时、间隔、启停、隐藏、排序、手动检测和 Agent 节点侧探测。
 - **后台管理**：节点增删改、批量隐藏/删除、拖拽排序、记录清理、Agent Token 轮换、安装命令生成、系统设置、审计日志、健康检查、容量估算、备份恢复、账号改名和改密。
+- **Agent 升级**：后台面板一键把节点升级到最新或指定版本，支持批量分波、失败重试、降级二次确认；升级失败自动回滚到原版本，节点全程在线不中断业务。
 - **通知**：支持 Telegram 、 SMTP Email 和 Webhook，可配置离线、到期、负载以及网站监控相关通知。
 - **主题**：内置 `monitor` 和 `aurora` 主题，支持主题包、自定义 CSS、图片和字体资源。
 - **管理员恢复**：首次登录时创建管理员；忘记账号或密码时，可在登录页用当前部署的 Supabase Secret key 重置唯一管理员。
@@ -173,6 +174,72 @@ wget -qO- 'https://raw.githubusercontent.com/jiuhunwl/cf-vps-monitor/refs/heads/
 ### 如果是 Deploy Button 一键部署
 
 Cloudflare 一键部署自动创建的仓库不保证包含可用的更新工作流，后台不再提供这类更新入口。需要后续稳定同步更新时，建议改用上面的 Fork 本仓库部署方式。
+
+
+## Agent 升级
+
+面板内置 Agent 升级功能，可把一个或多个节点原地升级到「最新版本」或「指定版本」，无需重新提供 `--server` / `--token`。
+
+### 使用方式
+
+1. 在后台节点列表选中一个或多个节点，点击「批量升级」，或在单节点行内点击「升级」。
+2. 弹窗显示「将升级 N 个 / 已最新跳过 M 个」。已是最新版本的节点会被自动跳过，不会重复升级。
+3. 选择目标版本（默认 `latest`，即当前仓库的最新 release）。**若目标版本低于节点当前版本，会要求二次确认**，并在 UI 上明确标注「降级」。
+4. 点击确认后，前端按每批 5 个节点串行推进；**单个节点失败不会阻塞其余节点**。失败节点保留在列表里，可单独重试。
+
+### 安全保证
+
+- **强制校验和**：每个升级包都用官方 `SHA256SUMS` 校验后才替换二进制；校验失败立即中止，原二进制不动。
+- **原子替换 + 自动回滚**：升级先暂存新版本，校验通过后原子替换并重启；重启后健康检查失败会自动回滚到原版本，节点保持在线。
+- **失败不破坏运行实例**：任何环节失败（下载、校验、替换、重启、健康检查、回滚）节点都必须仍以原版本正常运行。
+- **来源不可被面板注入**：下载来源（release base / proxy / ghproxy）由节点本地 root 监督进程的命令行参数决定，面板和 Worker 都不会把这三个字段下发到节点——这是为了防止任何持有面板权限的请求把节点导向攻击者控制的下载源绕过 SHA256。
+
+### 权限模型
+
+- 面板下发升级命令需要管理员登录态 + CSRF 校验（与其它后台写接口一致）。
+- 节点侧执行升级命令的监督进程以 root 权限运行（这样才能替换二进制、重启系统服务），但**只接受来自本机 root 守护单元的任务**，不接受远程网络直接驱动。
+- 升级请求里携带的 `requested_by` 字段会记录到审计日志，可追溯操作来源。
+
+### Windows 边界
+
+Windows 节点**不能由 Agent 自身替换**（运行中的 `.exe` 文件无法被改名/覆盖）。面板驱动的 Windows 升级会委托给 `install-windows.ps1 -Upgrade`：脚本先停止当前进程，再替换二进制，失败时回滚。这意味着 Windows 升级需要节点已安装带 `-Upgrade` 支持的安装脚本版本。
+
+### 引导升级（仅一次）
+
+面板驱动的升级要求节点**已装配带 root 监督单元的新版安装器**。更老的节点（安装于本功能发布之前）首次需要**手工跑一次安装脚本**来装配监督单元：
+
+```bash
+# Linux (amd64 / arm64)
+bash <(curl -fsSL https://raw.githubusercontent.com/jiuhunwl/cf-vps-monitor/main/agent/install-linux.sh) --upgrade
+
+# macOS / FreeBSD 等其它系统
+bash <(curl -fsSL https://raw.githubusercontent.com/jiuhunwl/cf-vps-monitor/main/agent/install.sh) --upgrade
+```
+
+```powershell
+# Windows (PowerShell 以管理员身份运行)
+irm https://raw.githubusercontent.com/jiuhunwl/cf-vps-monitor/main/agent/install-windows.ps1 | iex
+# 加 -Upgrade 参数执行升级
+```
+
+引导升级成功后，该节点即可被面板直接驱动升级；后续版本迭代无需再手工介入。
+
+### 升级状态语义
+
+每个升级命令的 `status` 取值与含义：
+
+| 状态 | 含义 |
+|---|---|
+| `queued` | 命令已创建，等待节点拉取 |
+| `dispatched` | 命令已下发到节点，等待执行开始 |
+| `running` | 节点正在执行升级 |
+| `success` | 升级成功，节点新版本已通过健康检查 |
+| `already_latest` | 目标版本与当前版本相同，无需升级 |
+| `failed` | 升级失败，已回滚到原版本，节点仍以原版本运行 |
+| `rolled_back` | 升级失败且自动回滚成功（与 `failed` 区分：回滚这一动作本身也成功了） |
+| `unverified` | 升级上报的版本与目标版本不符——可能是替换不完整或上报延迟，需要人工核对 |
+
+> `success` 是「新进程上报了目标版本」的可信结论；Worker 会在上报版本与目标版本不符时把它降级为 `unverified`，所以 `unverified` 在 UI 上显著区别于 `success`。
 
 
 ## 本地开发

@@ -16,6 +16,8 @@ import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from '../utils/notification-dispatch';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { hashAgentToken, isAgentTokenShape } from '../utils/client';
+import { isReportBatch } from '../utils/report-envelope';
+import { collectUpgradeReceipts, persistUpgradeReceipts } from '../utils/upgrade-receipts';
 import { readAcceptedCount, readClientReportResult, readRateLimitResult } from '../utils/do-response';
 import { invalidatePublicMetadataCache } from './public';
 
@@ -28,8 +30,10 @@ type CloudflareRequestMetadata = {
 };
 const HTTP_LIVE_TTL_FALLBACK_MS = 180_000;
 const HTTP_LIVE_TTL_MAX_MS = 24 * 60 * 60 * 1000;
+// Historical export name retained; this TTL applies to metadata hints only.
 export const AGENT_AUTH_CACHE_MS = 120_000;
-const AGENT_AUTH_NEGATIVE_CACHE_MS = 10_000;
+const AGENT_AUTH_TIMEOUT_MS = 10_000;
+const AGENT_TOKEN_USAGE_RETRY_MS = 30_000;
 const AGENT_AUTH_CACHE_MAX_ENTRIES = 512;
 const AGENT_TOKEN_USAGE_CACHE_MS = 15 * 60_000;
 const AGENT_PING_TASK_CACHE_MS = 120_000;
@@ -60,12 +64,12 @@ const AGENT_POLICY_SETTING_KEYS = [
 ];
 const AGENT_PING_INTERVAL_SETTING_KEYS = ['ping_record_persist_interval_sec'];
 
-type AgentAuthCacheEntry<T> = { value: T | null; expiresAt: number };
+type AgentMetadataCacheEntry = { value: db.Client; expiresAt: number };
 type JsonBodyResult = { body: unknown } | { response: Response };
-type AgentAuthLookupSource = 'memory' | 'do' | 'db' | 'miss';
+type AgentAuthLookupSource = 'db' | 'miss';
 
-let agentAuthCache = new Map<string, AgentAuthCacheEntry<db.Client>>();
-let agentIdentityAuthCache = new Map<string, AgentAuthCacheEntry<db.ClientIdentity>>();
+// Metadata hints only. Neither positive nor negative cache entries authorize a request.
+const agentMetadataCache = new Map<string, AgentMetadataCacheEntry>();
 let agentTokenUsageCache = new Map<string, { ip: string; expiresAt: number }>();
 let agentPingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
 let agentPingIntervalCache: { value: number; expiresAt: number } | null = null;
@@ -81,20 +85,12 @@ function runClientBackground(c: ClientContext, promise: Promise<unknown>): void 
 
 export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?: string }): void {
   if (!client) {
-    agentAuthCache.clear();
-    agentIdentityAuthCache.clear();
+    agentMetadataCache.clear();
     agentTokenUsageCache.clear();
     return;
   }
-  for (const [cacheKey, entry] of agentAuthCache) {
-    if (entry.value?.uuid === client.uuid) {
-      agentAuthCache.delete(cacheKey);
-    }
-  }
-  for (const [cacheKey, entry] of agentIdentityAuthCache) {
-    if (entry.value?.uuid === client.uuid) {
-      agentIdentityAuthCache.delete(cacheKey);
-    }
+  for (const [cacheKey, entry] of agentMetadataCache) {
+    if (entry.value.uuid === client.uuid) agentMetadataCache.delete(cacheKey);
   }
 }
 
@@ -110,17 +106,22 @@ async function markAgentTokenUsedIfDue(
   now = Date.now(),
 ): Promise<void> {
   const normalizedIp = ip.trim();
-  const cached = agentTokenUsageCache.get(cacheKey);
+  const usageKey = `${client.uuid}:${cacheKey}`;
+  const cached = agentTokenUsageCache.get(usageKey);
   if (cached && cached.expiresAt > now && cached.ip === normalizedIp) return;
   if (agentTokenUsageCache.size >= AGENT_AUTH_CACHE_MAX_ENTRIES) {
     const firstKey = agentTokenUsageCache.keys().next().value;
     if (typeof firstKey === 'string') agentTokenUsageCache.delete(firstKey);
   }
-  agentTokenUsageCache.set(cacheKey, {
-    ip: normalizedIp,
-    expiresAt: now + AGENT_TOKEN_USAGE_CACHE_MS,
-  });
-  const tokenUsageUpdated = await db.markClientTokenUsed(database, client.uuid, normalizedIp).catch(() => false);
+  const entry = { ip: normalizedIp, expiresAt: now + AGENT_TOKEN_USAGE_CACHE_MS };
+  agentTokenUsageCache.set(usageKey, entry);
+  let tokenUsageUpdated: boolean;
+  try { tokenUsageUpdated = await db.markClientTokenUsed(database, client.uuid, normalizedIp); }
+  catch {
+    // Retry a failed write after a bounded delay, without clearing a newer lease.
+    if (agentTokenUsageCache.get(usageKey) === entry) entry.expiresAt = Date.now() + AGENT_TOKEN_USAGE_RETRY_MS;
+    return;
+  }
   if (tokenUsageUpdated) {
     await recordAgentTokenSourceIpChange(database, client, normalizedIp).catch(() => undefined);
   }
@@ -131,21 +132,12 @@ export function invalidateAgentPingTaskCache(): void {
   agentPingIntervalCache = null;
 }
 
-function setAgentAuthCache<T>(
-  cache: Map<string, AgentAuthCacheEntry<T>>,
-  cacheKey: string,
-  value: T | null,
-  ttlMs: number,
-  now: number,
-): void {
-  if (cache.size >= AGENT_AUTH_CACHE_MAX_ENTRIES) {
-    const firstKey = cache.keys().next().value;
-    if (typeof firstKey === 'string') cache.delete(firstKey);
+function cacheAgentMetadata(cacheKey: string, value: db.Client, expiresAt: number): void {
+  if (agentMetadataCache.size >= AGENT_AUTH_CACHE_MAX_ENTRIES && !agentMetadataCache.has(cacheKey)) {
+    const firstKey = agentMetadataCache.keys().next().value;
+    if (typeof firstKey === 'string') agentMetadataCache.delete(firstKey);
   }
-  cache.set(cacheKey, {
-    value,
-    expiresAt: now + ttlMs,
-  });
+  agentMetadataCache.set(cacheKey, { value, expiresAt });
 }
 
 function stripCachedAgentToken<T extends { token?: string }>(client: T): T {
@@ -233,18 +225,20 @@ function liveDataAuthStub(env: Bindings): DurableObjectStub | null {
   }
 }
 
-async function readLiveAgentAuthClient(env: Bindings, tokenHash: string): Promise<db.Client | null> {
+async function readLiveAgentAuthClient(env: Bindings, tokenHash: string, signal?: AbortSignal): Promise<db.Client | null> {
   const stub = liveDataAuthStub(env);
   if (!stub) return null;
   const response = await stub.fetch(new Request('https://do/agent-auth/lookup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token_hash: tokenHash }),
+    signal,
   })).catch(() => null);
   if (!response?.ok) return null;
   const payload = await response.json().catch(() => null);
   if (!isJsonObjectPayload(payload) || !isJsonObjectPayload(payload.client)) return null;
-  return normalizeLiveAgentAuthClient(payload.client);
+  const client = normalizeLiveAgentAuthClient(payload.client);
+  return client?.token_hash.toLowerCase() === tokenHash.toLowerCase() ? client : null;
 }
 
 async function upsertLiveAgentAuthClient(env: Bindings, client: db.Client): Promise<void> {
@@ -295,84 +289,87 @@ export async function getAgentClientByToken(
   ip = '',
   deferBackground?: (promise: Promise<unknown>) => void,
   onAuthSource?: (source: AgentAuthLookupSource) => void,
+  options: { fresh?: boolean; signal?: AbortSignal } = {},
 ): Promise<db.Client | null> {
-  const now = Date.now();
+  const signal = options.signal ?? AbortSignal.timeout(AGENT_AUTH_TIMEOUT_MS);
+  signal.throwIfAborted();
   const cacheKey = await agentTokenLookupHash(token);
-  const cached = agentAuthCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    onAuthSource?.('memory');
-    return cached.value;
+  const identity = await db.getClientIdentityByToken(database, token, true, signal);
+  signal.throwIfAborted();
+  if (!identity) {
+    agentMetadataCache.delete(cacheKey);
+    onAuthSource?.('miss');
+    return null;
   }
 
-  const liveAuthClient = await readLiveAgentAuthClient(env, cacheKey);
-  if (liveAuthClient) {
-    const cachedClient = stripCachedAgentToken(liveAuthClient);
-    setAgentAuthCache(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
-    onAuthSource?.('do');
-    const tokenUsageTask = markAgentTokenUsedIfDue(database, liveAuthClient, cacheKey, ip, now);
-    if (deferBackground) deferBackground(tokenUsageTask);
-    else await tokenUsageTask;
-    return cachedClient;
-  }
-
-  const client = await db.getClientByToken(database, token, true);
-  if (client) {
-    const cachedClient = stripCachedAgentToken(client);
-    setAgentAuthCache(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
-    if (deferBackground) deferBackground(upsertLiveAgentAuthClient(env, client));
-    onAuthSource?.('db');
-    const tokenUsageTask = markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
-    if (deferBackground) deferBackground(tokenUsageTask);
-    else await tokenUsageTask;
-    return cachedClient;
+  const now = Date.now();
+  const cached = agentMetadataCache.get(cacheKey);
+  const localHint = !options.fresh && cached && cached.expiresAt > now ? cached.value : null;
+  const hint = options.fresh ? null : localHint || await readLiveAgentAuthClient(env, cacheKey, signal);
+  let record: db.Client;
+  let current: db.ClientIdentity = identity;
+  let fetchedFull = false;
+  if (hint && hint.uuid === identity.uuid
+    && hint.created_at === (identity.created_at || '')
+    && hint.token_rotated_at === (identity.token_rotated_at ?? null)) {
+    record = hint;
   } else {
-    setAgentAuthCache(agentAuthCache, cacheKey, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
+    const full = await db.getClientByToken(database, token, true, signal);
+    // Do not mix two principals if a token is reassigned between the lookups.
+    if (!full || full.uuid !== identity.uuid) {
+      agentMetadataCache.delete(cacheKey);
+      onAuthSource?.('miss');
+      return null;
+    }
+    record = full;
+    current = full;
+    fetchedFull = true;
   }
-  onAuthSource?.('miss');
-  return null;
+
+  signal.throwIfAborted();
+  const metadata = normalizeLiveAgentAuthClient({ ...record, token_hash: cacheKey });
+  if (!metadata) { onAuthSource?.('miss'); return null; }
+  const client: db.Client = {
+    ...metadata,
+    uuid: current.uuid, name: current.name, hidden: Boolean(current.hidden),
+    created_at: current.created_at || '', token_rotated_at: current.token_rotated_at ?? null,
+    token_last_used_ip: current.token_last_used_ip || '',
+    token_last_used_at: fetchedFull ? record.token_last_used_at ?? null : null,
+    token: '', token_hash: cacheKey,
+  };
+  // Repeated hits must not keep old metadata alive indefinitely.
+  const expiresAt = !fetchedFull && localHint === hint && cached
+    ? cached.expiresAt : now + AGENT_AUTH_CACHE_MS;
+  cacheAgentMetadata(cacheKey, client, expiresAt);
+  if (fetchedFull && deferBackground) deferBackground(upsertLiveAgentAuthClient(env, client));
+  onAuthSource?.('db');
+  const tokenUsageTask = markAgentTokenUsedIfDue(database, current, cacheKey, ip, now);
+  if (deferBackground) deferBackground(tokenUsageTask);
+  else await tokenUsageTask;
+  return client;
 }
 
 export async function getAgentClientIdentityByToken(
   database: db.QueryDatabase,
   token: string,
-  env: Bindings = {} as Bindings,
+  _env: Bindings = {} as Bindings,
   ip = '',
   deferBackground?: (promise: Promise<unknown>) => void,
   onAuthSource?: (source: AgentAuthLookupSource) => void,
+  options: { fresh?: boolean; signal?: AbortSignal } = {},
 ): Promise<db.ClientIdentity | null> {
-  const now = Date.now();
+  // `fresh` remains accepted for existing callers; identity is always current.
+  const signal = options.signal ?? AbortSignal.timeout(AGENT_AUTH_TIMEOUT_MS);
+  signal.throwIfAborted();
+  const client = await db.getClientIdentityByToken(database, token, true, signal);
+  signal.throwIfAborted();
+  if (!client) { onAuthSource?.('miss'); return null; }
   const cacheKey = await agentTokenLookupHash(token);
-  const cached = agentIdentityAuthCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    onAuthSource?.('memory');
-    return cached.value;
-  }
-
-  const liveAuthClient = await readLiveAgentAuthClient(env, cacheKey);
-  if (liveAuthClient) {
-    const cachedClient = stripCachedAgentToken(liveAuthClient);
-    setAgentAuthCache(agentIdentityAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
-    onAuthSource?.('do');
-    const tokenUsageTask = markAgentTokenUsedIfDue(database, liveAuthClient, cacheKey, ip, now);
-    if (deferBackground) deferBackground(tokenUsageTask);
-    else await tokenUsageTask;
-    return cachedClient;
-  }
-
-  const client = await db.getClientIdentityByToken(database, token, true);
-  if (client) {
-    const cachedClient = stripCachedAgentToken(client);
-    setAgentAuthCache(agentIdentityAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
-    onAuthSource?.('db');
-    const tokenUsageTask = markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
-    if (deferBackground) deferBackground(tokenUsageTask);
-    else await tokenUsageTask;
-    return cachedClient;
-  } else {
-    setAgentAuthCache(agentIdentityAuthCache, cacheKey, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
-  }
-  onAuthSource?.('miss');
-  return null;
+  onAuthSource?.('db');
+  const tokenUsageTask = markAgentTokenUsedIfDue(database, client, cacheKey, ip);
+  if (deferBackground) deferBackground(tokenUsageTask);
+  else await tokenUsageTask;
+  return stripCachedAgentToken(client);
 }
 
 async function listAgentPingTasks(database: db.QueryDatabase): Promise<db.PingTask[]> {
@@ -1004,14 +1001,20 @@ async function clientAuth(c: ClientContext, next: Next) {
 
   const database = getDatabase(c.env);
   let authSource: AgentAuthLookupSource = 'miss';
-  const client = await getAgentClientByToken(
-    database,
-    token,
-    c.env,
-    requestClientIp(c),
-    (task) => runClientBackground(c, task),
-    (source) => { authSource = source; },
-  );
+  let client: db.Client | null;
+  try {
+    client = await getAgentClientByToken(
+      database,
+      token,
+      c.env,
+      requestClientIp(c),
+      (task) => runClientBackground(c, task),
+      (source) => { authSource = source; },
+      { signal: AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(AGENT_AUTH_TIMEOUT_MS)]) },
+    );
+  } catch {
+    return c.json({ error: 'Agent authentication is temporarily unavailable' }, 503);
+  }
   c.header('X-CF-VPS-Monitor-Agent-Auth', authSource);
   if (!client) {
     const failureLimited = await enforceAgentAuthFailureLimit(c, token);
@@ -1046,14 +1049,20 @@ async function clientIdentityAuth(c: ClientContext, next: Next) {
 
   const database = getDatabase(c.env);
   let authSource: AgentAuthLookupSource = 'miss';
-  const client = await getAgentClientIdentityByToken(
-    database,
-    token,
-    c.env,
-    requestClientIp(c),
-    (task) => runClientBackground(c, task),
-    (source) => { authSource = source; },
-  );
+  let client: db.ClientIdentity | null;
+  try {
+    client = await getAgentClientIdentityByToken(
+      database,
+      token,
+      c.env,
+      requestClientIp(c),
+      (task) => runClientBackground(c, task),
+      (source) => { authSource = source; },
+      { signal: AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(AGENT_AUTH_TIMEOUT_MS)]) },
+    );
+  } catch {
+    return c.json({ error: 'Agent authentication is temporarily unavailable' }, 503);
+  }
   c.header('X-CF-VPS-Monitor-Agent-Auth', authSource);
   if (!client) {
     const failureLimited = await enforceAgentAuthFailureLimit(c, token);
@@ -1180,12 +1189,14 @@ clientRoutes.post('/report', clientAuth, async (c) => {
     const body = objectBody.body;
     const uuid = c.get('clientUuid')!;
     const nowMs = Date.now();
-    const rawReports = Array.isArray(body.reports)
-      ? body.reports.slice(0, AGENT_REPORT_MAX_BATCH).filter(isJsonObjectPayload)
-      : [body];
+    if (Object.hasOwn(body, 'reports') && !isReportBatch(body.reports, AGENT_REPORT_MAX_BATCH)) {
+      return c.json({ error: 'Invalid report batch' }, 400);
+    }
+    const rawReports = Array.isArray(body.reports) ? body.reports : [body];
     if (rawReports.length === 0) {
       return c.json({ error: '上报数据不能为空' }, 400);
     }
+    const upgradeReceipts = collectUpgradeReceipts(rawReports, body);
     const reports = rawReports.map((item) => normalizeMonitorReport(item));
     const report = reports[reports.length - 1];
     const liveName = c.get('clientName') || uuid;
@@ -1207,14 +1218,11 @@ clientRoutes.post('/report', clientAuth, async (c) => {
       })());
     }
 
-    // 升级回执：解析 upgrade_results → 按 command_id 去重 → 落库（含交叉校验）。
-    // 失败必须吞掉 —— 升级回执不能让主上报链路失败（设计契约 §4.2.4）。
-    const upgradeResults = extractUpgradeResults(body);
-    if (upgradeResults.length > 0) {
-      runClientBackground(c, persistUpgradeResults(database, uuid, report.version, upgradeResults));
-    }
+    // Telemetry acceptance and upgrade-result receipts are independent.
+    // Only confirmed database outcomes appear in the explicit receipt list.
+    const acceptedUpgradeIds = await persistUpgradeReceipts(database, uuid, upgradeReceipts);
 
-    return c.json({ success: true, persisted });
+    return c.json({ success: true, persisted, accepted_upgrade_ids: acceptedUpgradeIds });
   } catch (e) {
     return c.json({ error: '上报失败' }, 500);
   }
@@ -1304,72 +1312,5 @@ clientRoutes.post('/ping/result', clientIdentityAuth, async (c) => {
     return c.json({ error: '上报失败' }, 500);
   }
 });
-
-/* ---------------------------------------------------------------------------
- * Agent 升级回执解析与落库（T03）
- * ------------------------------------------------------------------------- */
-
-/** 从上报 body 中提取 upgrade_results 数组（键名与 agent/upgrade_state.go:96 对齐）。*/
-function extractUpgradeResults(body: unknown): db.AgentUpgradeResult[] {
-  if (!body || typeof body !== 'object') return [];
-  const raw = (body as { upgrade_results?: unknown }).upgrade_results;
-  if (!Array.isArray(raw)) return [];
-  const seen = new Set<string>();
-  const results: db.AgentUpgradeResult[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const r = item as Record<string, unknown>;
-    const commandId = typeof r.command_id === 'string' ? r.command_id : '';
-    if (!commandId || seen.has(commandId)) continue;  // 按 command_id 去重
-    seen.add(commandId);
-    results.push({
-      command_id: commandId,
-      target_version: typeof r.target_version === 'string' ? r.target_version : '',
-      from_version: typeof r.from_version === 'string' ? r.from_version : '',
-      final_version: typeof r.final_version === 'string' ? r.final_version : '',
-      status: (typeof r.status === 'string' && ['success', 'already_latest', 'rolled_back', 'failed'].includes(r.status)
-        ? r.status as db.AgentUpgradeResult['status']
-        : 'failed'),
-      failure_code: typeof r.failure_code === 'string' ? r.failure_code : undefined,
-      reason: typeof r.reason === 'string' ? r.reason : undefined,
-      started_at: typeof r.started_at === 'number' ? r.started_at : 0,
-      finished_at: typeof r.finished_at === 'number' ? r.finished_at : 0,
-    });
-  }
-  return results;
-}
-
-/** 把升级回执落库。失败只记日志，绝不抛错（不能影响主上报响应）。*/
-async function persistUpgradeResults(
-  database: db.QueryDatabase,
-  clientUuid: string,
-  reportVersion: string | undefined,
-  results: db.AgentUpgradeResult[],
-): Promise<void> {
-  const reportedAt = new Date().toISOString();
-  for (const result of results) {
-    try {
-      await db.recordAgentUpgradeResult(database, {
-        command_id: result.command_id,
-        client_uuid: clientUuid,
-        status: result.status,
-        from_version: result.from_version,
-        final_version: result.final_version || reportVersion || '',
-        target_version: result.target_version,
-        failure_code: result.failure_code || '',
-        reason: result.reason || '',
-        reported_at: reportedAt,
-      } as unknown as db.AgentUpgradeResult);
-    } catch (error) {
-      await bestEffortRecordHealthEvent(
-        database,
-        'ping_persistence',
-        'error',
-        `agent upgrade result persist failed for command ${result.command_id}: ${errorDetail(error)}`,
-        { auditAction: 'agent_upgrade_result_error' },
-      );
-    }
-  }
-}
 
 export { clientRoutes, clientAuth, clientIdentityAuth };

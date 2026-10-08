@@ -263,15 +263,18 @@ func (s *pingReportState) takeRetryReports() []Report {
 
 func deliverHTTPReports(state *pingReportState, reports []Report) error {
 	for len(reports) > 0 {
-		count := min(len(reports), maxReportsPerEnvelope)
-		batch := state.currentReportResults(reports[:count])
-		if err := sendHTTPReports(batch); err != nil {
+		candidates := state.currentReportResults(reports[:min(len(reports), maxReportsPerEnvelope)])
+		batch, err := prepareReportBatch(candidates, reportHTTP, upgradeRuntime.snapshot())
+		if err == nil {
+			err = sendHTTPReports(batch)
+		}
+		if err != nil {
 			log.Printf("HTTP report not accepted; probe results retained: %v", err)
 			state.retryReports(reports)
 			return err
 		}
-		state.acknowledgeReports(batch)
-		reports = reports[count:]
+		state.acknowledgeReports(batch.reports)
+		reports = reports[len(batch.reports):]
 	}
 	return nil
 }

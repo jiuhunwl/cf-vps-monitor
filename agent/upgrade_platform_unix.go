@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // openNoFollow opens a file refusing to traverse a symlink at the final path
@@ -27,11 +29,101 @@ func moveFileAtomic(source, destination string) error {
 	return os.Rename(source, destination)
 }
 
-// lockUpgradeFile takes a non-blocking exclusive advisory lock via flock.
-func lockUpgradeFile(path string) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+// openRootUpgradeDirectory pins every directory before checking ownership.
+// Root never follows aliases or traverses a directory writable by the Agent.
+func openRootUpgradeDirectory(path string) (*os.File, error) {
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("privileged upgrade install directory must be absolute")
+	}
+	for _, part := range strings.Split(path, "/") {
+		if part == ".." {
+			return nil, errors.New("privileged upgrade install directory must not contain parent traversal")
+		}
+	}
+	flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	fd, err := unix.Open("/", flags, 0)
 	if err != nil {
 		return nil, err
+	}
+	defer func() {
+		if fd >= 0 {
+			_ = unix.Close(fd)
+		}
+	}()
+	check := func() error {
+		var info unix.Stat_t
+		if err := unix.Fstat(fd, &info); err != nil {
+			return err
+		}
+		if info.Uid != 0 || info.Mode&0022 != 0 || info.Mode&unix.S_IFMT != unix.S_IFDIR {
+			return errors.New("privileged upgrade directory chain must be root-owned and not group/other-writable")
+		}
+		return nil
+	}
+	if err := check(); err != nil {
+		return nil, err
+	}
+	clean := filepath.Clean(path)
+	for _, part := range strings.Split(strings.TrimPrefix(clean, "/"), "/") {
+		if part == "" {
+			continue
+		}
+		next, err := unix.Openat(fd, part, flags, 0)
+		if err != nil {
+			return nil, fmt.Errorf("open privileged upgrade directory: %w", err)
+		}
+		_ = unix.Close(fd)
+		fd = next
+		if err := check(); err != nil {
+			return nil, err
+		}
+	}
+	directory := os.NewFile(uintptr(fd), clean)
+	fd = -1 // ownership transferred to directory
+	return directory, nil
+}
+
+func platformAcquireUpgradeLock(options upgradeOptions) (*os.File, string, error) {
+	if os.Geteuid() != 0 {
+		path := stateFile(options.stateDir, upgradeLockFile)
+		file, err := lockUpgradeFile(path)
+		return file, path, err
+	}
+	directory, err := openRootUpgradeDirectory(options.installDir)
+	if err != nil {
+		return nil, "", err
+	}
+	defer directory.Close()
+	path := filepath.Join(options.installDir, upgradeLockFile)
+	fd, err := unix.Openat(int(directory.Fd()), upgradeLockFile,
+		unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0600)
+	if err != nil {
+		return nil, path, err
+	}
+	file, err := finishUpgradeLock(os.NewFile(uintptr(fd), path))
+	return file, path, err
+}
+
+// lockUpgradeFile is the non-root state-file path. Do not use it to select a
+// privileged lock: platformAcquireUpgradeLock also pins a trusted parent chain.
+func lockUpgradeFile(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0600)
+	if err != nil {
+		return nil, err
+	}
+	return finishUpgradeLock(file)
+}
+
+func finishUpgradeLock(file *os.File) (*os.File, error) {
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) || info.Mode().Perm()&0077 != 0 {
+		file.Close()
+		return nil, errors.New("upgrade lock must be a private, single-link regular file owned by the current user")
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		file.Close()

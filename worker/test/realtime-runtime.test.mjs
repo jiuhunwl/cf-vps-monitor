@@ -21,12 +21,14 @@ function awaitMessage(ws, type, send) {
 test('AUD-30/32/35/37: actual Durable Objects preserve bounded reports, all Ping batches and HTTP state', { timeout: 90000 }, async t => {
   const f = await createRuntimeFixture({ persistDurableObjects: true });
   t.after(() => f.close());
+  const token = 'synthetic-realtime-token-'.padEnd(64, '0');
   await f.database.query("insert into clients(uuid,name) values ('runtime-node','Runtime fixture'), ('http-node','HTTP fixture')");
+  await f.database.query("update clients set token=$1 where uuid='runtime-node'", [token]);
   await f.database.exec(`insert into ping_tasks(name,type,target,all_clients,interval_sec)
     select 'synthetic-'||i, 'tcp', 'example.test:443', 1, 120 from generate_series(1,1000) i`);
   const namespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
   const stub = namespace.get(namespace.idFromName('runtime-ws'));
-  const response = await stub.fetch('https://do/?role=agent&id=runtime-node&name=Runtime', { headers: { Upgrade: 'websocket' } });
+  const response = await stub.fetch('https://do/?role=agent&id=runtime-node&name=Runtime', { headers: { Upgrade: 'websocket', Authorization: `Bearer ${token}` } });
   assert.equal(response.status, 101);
   const ws = response.webSocket;
   ws.accept();

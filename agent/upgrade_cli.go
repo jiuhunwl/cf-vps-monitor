@@ -187,6 +187,9 @@ func parseUpgradeOptions(args []string, stderr io.Writer) (upgradeOptions, bool,
 		return options, once, err
 	}
 	options.ghProxy = normalizedGhProxy
+	if err := requireHTTPSURL("--install-ghproxy", options.ghProxy); err != nil {
+		return options, once, err
+	}
 	if err := requireHTTPSURL("--release-base", options.releaseBase); err != nil {
 		return options, once, err
 	}
@@ -226,7 +229,7 @@ func runUpgradeSupervisor(options upgradeOptions, once bool, stdout, stderr io.W
 		fmt.Fprintf(stderr, "upgrade: %v\n", err)
 		return 1
 	}
-	lock, err := acquireUpgradeLock(options.stateDir)
+	lock, err := acquireUpgradeLock(options)
 	if err != nil {
 		logUpgrade("supervisor cannot acquire lock: %v", err)
 		return 1
@@ -480,7 +483,7 @@ func validateUpgradeRequest(request upgradeRequest) error {
 	if _, err := normalizeProxyURL("proxy", request.Proxy); err != nil {
 		return err
 	}
-	if _, err := normalizeProxyURL("ghproxy", request.GhProxy); err != nil {
+	if err := requireHTTPSURL("ghproxy", request.GhProxy); err != nil {
 		return err
 	}
 	return nil

@@ -27,6 +27,8 @@ test('native Durable Object storage retains offline HTTP and WebSocket metrics a
       ? Response.json({ record_enabled: 'false' }) : undefined,
   });
   t.after(() => f.close());
+  const token = 'synthetic-offline-token-'.padEnd(64, '0');
+  await f.database.query("insert into clients(uuid,name,token) values ('offline-ws','Stored socket',$1)", [token]);
   const controls = [
     { uuid: 'offline-ws', name: 'Stored socket', hidden: false, sort_order: 4 },
     { uuid: 'offline-http', name: 'Stored HTTP', hidden: false, sort_order: 2 },
@@ -40,7 +42,7 @@ test('native Durable Object storage retains offline HTTP and WebSocket metrics a
   const snapshot = async (includeHidden = false) => (await stub.fetch(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`)).json();
   assert.equal((await mutate('admin-clients-snapshot', { clients: controls }, 'PUT')).status, 200);
 
-  const upgraded = await stub.fetch('https://do/?role=agent&id=offline-ws&name=Agent', { headers: { Upgrade: 'websocket' } });
+  const upgraded = await stub.fetch('https://do/?role=agent&id=offline-ws&name=Agent', { headers: { Upgrade: 'websocket', Authorization: `Bearer ${token}` } });
   assert.equal(upgraded.status, 101);
   const ws = upgraded.webSocket;
   ws.accept();

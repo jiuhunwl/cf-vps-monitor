@@ -9,3 +9,10 @@ export function unwrapMonitorReportEnvelope(report: JsonObject): JsonObject {
     ? report.data
     : report;
 }
+
+// A successful ACK must never silently accept only a filtered/truncated prefix.
+export function isReportBatch(value: unknown, max: number): value is JsonObject[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > max) return false;
+  for (const item of value) if (!isJsonObject(item)) return false;
+  return true;
+}

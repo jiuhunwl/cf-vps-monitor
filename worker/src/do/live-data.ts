@@ -8,6 +8,8 @@
  * 4. 使用 Alarm 定时清理过期连接
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { PendingIngressBudget } from '../utils/pending-ingress-budget';
 import { normalizeMonitorReport, toMonitorRecord, type MonitorReportPayload } from '../utils/monitor-report';
 import * as db from '../db/queries';
 import { getDatabase, type DatabaseProviderEnv } from '../db/provider';
@@ -18,13 +20,15 @@ import {
 } from '../settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from '../utils/observability';
 import { isPublicIpAddress } from '../utils/request-ip';
-import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
+import { unwrapMonitorReportEnvelope, isReportBatch } from '../utils/report-envelope';
 import { isRecordPersistDue } from '../utils/record-persist';
 import { checkWebsiteMonitorHttp } from '../utils/website-monitor';
 import { toPublicReport } from '../utils/public-report';
 import { projectAgentClientMetadata, projectClientMetadata } from '../utils/client-metadata';
 import { compactLiveReport, serializedBytes } from '../utils/live-report-state';
 import { evaluateHistoryCapacity } from '../utils/history-capacity';
+import { isAgentTokenShape } from '../utils/client';
+import { collectUpgradeReceipts, persistUpgradeReceipts } from '../utils/upgrade-receipts';
 import { MAX_BACKUP_BYTES } from '../utils/backup';
 import { measureRestoredClientSnapshot, restoredClientMetadata } from '../utils/restore-client-snapshot';
 
@@ -38,6 +42,8 @@ interface ClientState {
   expiresAt?: number;
   transport?: 'http' | 'ws'; // Absent on legacy HTTP snapshots.
 }
+
+interface AgentIngressWork { pending: Set<Promise<unknown>> }
 
 interface ReportLifecycle {
   clientId: string;
@@ -95,6 +101,8 @@ const HTTP_CLIENT_META_MAX_BODY_BYTES = 16 * 1024;
 const HTTP_ADMIN_CLIENTS_SNAPSHOT_MAX_BODY_BYTES = 256 * 1024;
 const HTTP_PING_RESULT_MAX_BODY_BYTES = 64 * 1024;
 const AGENT_WS_MAX_MESSAGE_BYTES = 512 * 1024;
+const AGENT_SESSION_AUTH_VERSION = 1;
+const AGENT_CONNECTION_AUTH_TIMEOUT_MS = 10_000;
 // Cloudflare permits 16,384 bytes; leave room for structured-clone overhead.
 const AGENT_ATTACHMENT_BUDGET_BYTES = 12 * 1024;
 const AGENT_REPORT_MAX_BATCH = 300;
@@ -393,6 +401,7 @@ interface ReportNetworkMetadata {
 
 interface SessionAttachment {
   role: SessionRole;
+  agentAuthVersion?: number;
   clientId: string;
   clientName: string;
   hidden: boolean;
@@ -424,6 +433,9 @@ export class LiveDataDO {
   private lastKnownClients = new Map<string, ClientState>();
   private clientReportWrites = new Map<string, Promise<unknown>>();
   private clientRemovalVersions = new Map<string, number>();
+  private agentConnectionOperations = new Map<string, Promise<unknown>>();
+  private agentPendingIngress = new PendingIngressBudget();
+  private agentIngressContext = new AsyncLocalStorage<AgentIngressWork>();
   private restoreVersion = 0;
   private httpClientsReady: Promise<void>;
   private recordPersistenceEnabled: boolean = true;
@@ -566,6 +578,11 @@ export class LiveDataDO {
         // Avoid surfacing a secondary failure from best-effort observability.
       }
     });
+    const ingress = this.agentIngressContext.getStore();
+    if (ingress) {
+      ingress.pending.add(task);
+      void task.then(() => ingress.pending.delete(task), () => ingress.pending.delete(task));
+    }
     this.state.waitUntil(task);
   }
 
@@ -577,6 +594,7 @@ export class LiveDataDO {
     if (typeof value.clientId !== 'string' || value.clientId.trim() === '') return null;
     return {
       role: value.role,
+      agentAuthVersion: value.agentAuthVersion === AGENT_SESSION_AUTH_VERSION ? AGENT_SESSION_AUTH_VERSION : 0,
       clientId: value.clientId,
       clientName: typeof value.clientName === 'string' && value.clientName.trim() !== ''
         ? value.clientName
@@ -605,6 +623,82 @@ export class LiveDataDO {
     };
   }
 
+  private isCurrentAgentSession(ws: WebSocket, clientId?: string): boolean {
+    const attachment = this.getSessionAttachment(ws);
+    return attachment?.role === 'agent'
+      && attachment.agentAuthVersion === AGENT_SESSION_AUTH_VERSION
+      && (!clientId || attachment.clientId === clientId)
+      && this.sessions.get(attachment.clientId) === ws
+      && ws.readyState === WebSocket.READY_STATE_OPEN;
+  }
+
+  private retireAgentSession(ws: WebSocket, attachment: SessionAttachment, closeCode = 1008, closeReason = 'Agent authorization retired'): void {
+    if (attachment.role !== 'agent') return;
+    if (attachment.agentAuthVersion === AGENT_SESSION_AUTH_VERSION) {
+      if (this.sessions.get(attachment.clientId) === ws && this.clientReportWrites.has(attachment.clientId)) {
+        this.clientRemovalVersions.set(attachment.clientId, (this.clientRemovalVersions.get(attachment.clientId) || 0) + 1);
+      }
+      // Persist a small tombstone before closing. If persistence fails, callers
+      // must not report successful revocation or accept a replacement.
+      ws.serializeAttachment({ role: 'agent', clientId: attachment.clientId,
+        clientName: attachment.clientId, hidden: true, agentAuthVersion: 0 });
+    }
+    // Legacy or already retired attachments have no authority to revoke again.
+    try { ws.close(closeCode, closeReason); } catch {}
+  }
+
+  private async runAgentConnectionOperation<T>(clientId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.agentConnectionOperations.get(clientId) || Promise.resolve();
+    const pending = previous.catch(() => {}).then(work);
+    this.agentConnectionOperations.set(clientId, pending);
+    try { return await pending; }
+    finally {
+      if (this.agentConnectionOperations.get(clientId) === pending) this.agentConnectionOperations.delete(clientId);
+    }
+  }
+
+  private async readCurrentAgentIdentity(token: string): Promise<db.ClientIdentity | null> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        db.getClientIdentityByToken(getDatabase(this.env), token, true, controller.signal),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error('Agent authorization timed out'));
+          }, AGENT_CONNECTION_AUTH_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private async handleWebSocketUpgrade(request: Request, url: URL): Promise<Response> {
+    if (url.searchParams.get('role') !== 'agent') return this.acceptWebSocket(request, url);
+    const clientId = url.searchParams.get('id') || '';
+    const authorization = request.headers.get('Authorization') || '';
+    const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+    if (!clientId || !isAgentTokenShape(token)) return Response.json({ error: 'Invalid agent credentials' }, { status: 401 });
+    // Do not queue a reconnect storm behind a slow lookup or a revocation.
+    // Removal itself is always queued and cannot be overtaken by handshakes.
+    if (this.agentConnectionOperations.has(clientId)) return Response.json({ error: 'Agent connection busy' }, { status: 429 });
+    const restoreVersion = this.restoreVersion;
+    return this.runAgentConnectionOperation(clientId, async () => {
+      let identity: db.ClientIdentity | null;
+      try { identity = await this.readCurrentAgentIdentity(token); }
+      catch { return Response.json({ error: 'Agent authorization unavailable' }, { status: 503 }); }
+      if (!identity || identity.uuid !== clientId) return Response.json({ error: 'Invalid agent credentials' }, { status: 401 });
+      try { await this.resolveReportClientControl(clientId, identity.name, Boolean(identity.hidden)); }
+      catch { return Response.json({ error: 'Agent authorization removed' }, { status: 401 }); }
+      if (this.restoreVersion !== restoreVersion) return Response.json({ error: 'Agent configuration changed; reconnect' }, { status: 409 });
+      // No asynchronous work occurs in the agent branch between this check
+      // and attachment registration/acceptance.
+      return this.acceptWebSocket(request, url, identity);
+    });
+  }
+
   private registerSession(ws: WebSocket, attachment: SessionAttachment): void {
     ws.serializeAttachment(attachment);
     this.sessions.set(attachment.clientId, ws);
@@ -621,6 +715,10 @@ export class LiveDataDO {
     for (const ws of this.state.getWebSockets()) {
       const attachment = this.getSessionAttachment(ws);
       if (!attachment) continue;
+      if (attachment.role === 'agent' && attachment.agentAuthVersion !== AGENT_SESSION_AUTH_VERSION) {
+        try { this.retireAgentSession(ws, attachment); } catch {}
+        continue;
+      }
       if (attachment.role === 'viewer' && attachment.viewerExpiresAt && attachment.viewerExpiresAt <= now) {
         this.expireViewer(attachment.clientId, ws, now);
         continue;
@@ -1014,6 +1112,7 @@ export class LiveDataDO {
     const previous = this.getSessionAttachment(ws);
     const attachment: SessionAttachment = {
       role: 'agent',
+      agentAuthVersion: previous?.agentAuthVersion ?? 0,
       clientId,
       clientName: clientName.slice(0, 256),
       hidden,
@@ -1299,7 +1398,7 @@ export class LiveDataDO {
   }
 
   private sendAgentPolicy(session: WebSocket, policy: AgentPolicyMessage): void {
-    if (session.readyState !== WebSocket.READY_STATE_OPEN) return;
+    if (!this.isCurrentAgentSession(session)) return;
     try {
       session.send(JSON.stringify(policy));
     } catch {
@@ -1674,41 +1773,41 @@ export class LiveDataDO {
       });
     }
 
-    const keepMetadata = meta.keepMetadata === true;
-    if (this.clientReportWrites.has(meta.uuid)) {
-      this.clientRemovalVersions.set(meta.uuid, (this.clientRemovalVersions.get(meta.uuid) || 0) + 1);
-    }
-    const existing = this.clients.get(meta.uuid) || this.lastKnownClients.get(meta.uuid);
-    const session = this.sessions.get(meta.uuid);
-    if (session && session.readyState === WebSocket.READY_STATE_OPEN) {
-      try {
-        session.close(1008, 'Client removed');
-      } catch {
-        // Best effort only.
+    const clientId = meta.uuid;
+    return this.runAgentConnectionOperation(clientId, async () => {
+      const keepMetadata = meta.keepMetadata === true;
+      if (this.clientReportWrites.has(clientId)) {
+        this.clientRemovalVersions.set(clientId, (this.clientRemovalVersions.get(clientId) || 0) + 1);
       }
-    }
-    this.sessions.delete(meta.uuid);
-    this.sessionRoles.delete(meta.uuid);
-    this.clients.delete(meta.uuid);
-    this.lastKnownClients.delete(meta.uuid);
-    await this.state.storage.delete(`${HTTP_LIVE_STATE_PREFIX}${meta.uuid}`);
-    await this.removeAgentAuthByUuid(String(meta.uuid));
-    if (!keepMetadata) {
-      await this.removeAdminClientSnapshot(String(meta.uuid));
-    }
-    if (existing) {
-      this.broadcastToViewers({
-        type: 'remove',
-        client: meta.uuid,
-        timestamp: Date.now(),
-      }, existing.hidden ? 'admin' : 'all');
-    }
-    if (!keepMetadata) {
-      this.broadcastMetadataChanged({ clients: { remove: [String(meta.uuid)] } });
-    }
+      const existing = this.clients.get(clientId) || this.lastKnownClients.get(clientId);
+      const session = this.sessions.get(clientId);
+      if (session) {
+        const attachment = this.getSessionAttachment(session);
+        if (attachment) this.retireAgentSession(session, attachment);
+      }
+      this.sessions.delete(clientId);
+      this.sessionRoles.delete(clientId);
+      this.clients.delete(clientId);
+      this.lastKnownClients.delete(clientId);
+      await this.state.storage.delete(`${HTTP_LIVE_STATE_PREFIX}${clientId}`);
+      await this.removeAgentAuthByUuid(String(clientId));
+      if (!keepMetadata) {
+        await this.removeAdminClientSnapshot(String(clientId));
+      }
+      if (existing) {
+        this.broadcastToViewers({
+          type: 'remove',
+          client: clientId,
+          timestamp: Date.now(),
+        }, existing.hidden ? 'admin' : 'all');
+      }
+      if (!keepMetadata) {
+        this.broadcastMetadataChanged({ clients: { remove: [String(clientId)] } });
+      }
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { 'Content-Type': 'application/json' },
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
     });
   }
 
@@ -1842,8 +1941,11 @@ export class LiveDataDO {
     const parsed = await parseJsonRequestWithLimit(request, HTTP_CLIENT_REPORT_MAX_BODY_BYTES);
     if ('response' in parsed) return parsed.response;
     const payload = parsed.body;
+    if (payload && Object.hasOwn(payload, 'reports') && !isReportBatch(payload.reports, AGENT_REPORT_MAX_BATCH)) {
+      return Response.json({ error: 'Invalid report batch' }, { status: 400 });
+    }
     const reports = Array.isArray(payload?.reports)
-      ? payload.reports.slice(0, AGENT_REPORT_MAX_BATCH).filter(isObjectPayload)
+      ? payload.reports
       : isObjectPayload(payload?.report)
         ? [payload.report]
         : [];
@@ -2108,7 +2210,7 @@ export class LiveDataDO {
       for (const socket of new Set([...this.sessions.values(), ...this.state.getWebSockets()])) {
         const attachment = this.getSessionAttachment(socket);
         if (attachment?.role !== 'agent') continue;
-        try { socket.close(1008, 'Client configuration restored'); } catch {}
+        this.retireAgentSession(socket, attachment);
         this.sessions.delete(attachment.clientId);
         this.sessionRoles.delete(attachment.clientId);
       }
@@ -2231,76 +2333,7 @@ export class LiveDataDO {
       return Response.json(await this.buildAgentPolicy(Date.now(), false));
     }
 
-    // WebSocket 升级
-    if (request.headers.get('Upgrade') === 'websocket') {
-      const pair = new WebSocketPair();
-      const [client, server] = Object.values(pair);
-
-      const clientId = url.searchParams.get('id') || crypto.randomUUID();
-      const clientName = url.searchParams.get('name') || clientId;
-      const hidden = url.searchParams.get('hidden') === '1' || url.searchParams.get('hidden') === 'true';
-      const role = url.searchParams.get('role') === 'agent' ? 'agent' : 'viewer';
-      const viewerIp = url.searchParams.get('viewer_ip') || undefined;
-      const sourceIp = url.searchParams.get('source_ip') || undefined;
-      const region = url.searchParams.get('region') || undefined;
-      const now = Date.now();
-      const activeViewersBefore = this.activeViewerCount(now);
-
-      if (role === 'viewer') {
-        const limitResponse = this.enforceViewerConnectionLimit(viewerIp);
-        if (limitResponse) return limitResponse;
-        await this.getAgentPolicySettings(now);
-      }
-
-      const oldSession = role === 'agent' ? this.sessions.get(clientId) : undefined;
-      if (oldSession && oldSession.readyState === WebSocket.READY_STATE_OPEN) {
-        try {
-          oldSession.close(1000, 'Replaced by a new connection');
-        } catch {
-          // Best effort only.
-        }
-      }
-
-      // viewer 窗口由 DO 自己的设置决定（已缓存，无需额外查库）。
-      // 显式传参仍然优先，便于覆盖与向后兼容；缺省时才回落到设置项，
-      // 从而消除"对外宣称 X 秒、实际执行写死的 120 秒"这一不一致。
-      const viewerTtlParam = url.searchParams.get('viewer_ttl_ms');
-      const viewerTtlMs = viewerTtlParam !== null
-        ? normalizeViewerTtlMs(viewerTtlParam)
-        : normalizeViewerTtlMs(this.policySettings.viewerTtlSec * 1000);
-
-      const attachment: SessionAttachment = {
-        role,
-        clientId,
-        clientName,
-        hidden,
-        ...(role === 'viewer' && viewerIp ? { viewerIp } : {}),
-        ...(role === 'viewer' ? { viewerExpiresAt: now + viewerTtlMs } : {}),
-        ...(role === 'viewer' && (url.searchParams.get('include_hidden') === '1' || url.searchParams.get('include_hidden') === 'true') ? { includeHidden: true } : {}),
-        ...(role === 'agent' && sourceIp && isPublicIpAddress(sourceIp) ? { sourceIp } : {}),
-        ...(role === 'agent' && region && this.isUsefulRegion(region) ? { region } : {}),
-      };
-      this.registerSession(server, attachment);
-      this.state.acceptWebSocket(server);
-
-      if (role === 'viewer') {
-        this.sendSnapshot(server);
-        this.runBackground('do_viewer_expiry', this.scheduleExpiryAlarm(now));
-        if (activeViewersBefore === 0) {
-          this.runBackground('do_agent_policy', this.broadcastAgentPolicy(now, true));
-        }
-      } else {
-        this.runBackground('do_agent_policy', this.sendCurrentPolicyToAgent(server, now, false, false, clientId));
-      }
-
-      const requestedProtocols = (request.headers.get('Sec-WebSocket-Protocol') || '')
-        .split(',')
-        .map(protocol => protocol.trim());
-      const headers = requestedProtocols.includes(LIVE_VIEWER_WS_PROTOCOL)
-        ? { 'Sec-WebSocket-Protocol': LIVE_VIEWER_WS_PROTOCOL }
-        : undefined;
-      return new Response(null, { status: 101, webSocket: client, headers });
-    }
+    if (request.headers.get('Upgrade') === 'websocket') return this.handleWebSocketUpgrade(request, url);
 
     // HTTP GET - 获取缓存的实时数据
     if (request.method === 'GET') {
@@ -2313,22 +2346,99 @@ export class LiveDataDO {
     return new Response('Not Found', { status: 404 });
   }
 
+  private async acceptWebSocket(request: Request, url: URL, identity?: db.ClientIdentity): Promise<Response> {
+    const role = url.searchParams.get('role') === 'agent' ? 'agent' : 'viewer';
+    if (role === 'agent' && !identity) return Response.json({ error: 'Invalid agent credentials' }, { status: 401 });
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    const clientId = url.searchParams.get('id') || crypto.randomUUID();
+    const clientName = identity ? identity.name || identity.uuid : url.searchParams.get('name') || clientId;
+    const hidden = identity ? Boolean(identity.hidden) : url.searchParams.get('hidden') === '1' || url.searchParams.get('hidden') === 'true';
+    const viewerIp = url.searchParams.get('viewer_ip') || undefined;
+    const sourceIp = url.searchParams.get('source_ip') || undefined;
+    const region = url.searchParams.get('region') || undefined;
+    const now = Date.now();
+    const activeViewersBefore = this.activeViewerCount(now);
+
+    if (role === 'viewer') {
+      const limitResponse = this.enforceViewerConnectionLimit(viewerIp);
+      if (limitResponse) return limitResponse;
+      await this.getAgentPolicySettings(now);
+    }
+
+    const oldSession = role === 'agent' ? this.sessions.get(clientId) : undefined;
+    if (oldSession) {
+      const previous = this.getSessionAttachment(oldSession);
+      if (previous) this.retireAgentSession(oldSession, previous);
+    }
+
+    // viewer 窗口由 DO 自己的设置决定（已缓存，无需额外查库）。
+    // 显式传参仍然优先，便于覆盖与向后兼容；缺省时才回落到设置项，
+    // 从而消除"对外宣称 X 秒、实际执行写死的 120 秒"这一不一致。
+    const viewerTtlParam = url.searchParams.get('viewer_ttl_ms');
+    const viewerTtlMs = viewerTtlParam !== null
+      ? normalizeViewerTtlMs(viewerTtlParam)
+      : normalizeViewerTtlMs(this.policySettings.viewerTtlSec * 1000);
+
+    const attachment: SessionAttachment = {
+      role,
+      ...(role === 'agent' ? { agentAuthVersion: AGENT_SESSION_AUTH_VERSION } : {}),
+      clientId,
+      clientName,
+      hidden,
+      ...(role === 'viewer' && viewerIp ? { viewerIp } : {}),
+      ...(role === 'viewer' ? { viewerExpiresAt: now + viewerTtlMs } : {}),
+      ...(role === 'viewer' && (url.searchParams.get('include_hidden') === '1' || url.searchParams.get('include_hidden') === 'true') ? { includeHidden: true } : {}),
+      ...(role === 'agent' && sourceIp && isPublicIpAddress(sourceIp) ? { sourceIp } : {}),
+      ...(role === 'agent' && region && this.isUsefulRegion(region) ? { region } : {}),
+    };
+    this.registerSession(server, attachment);
+    this.state.acceptWebSocket(server);
+
+    if (role === 'viewer') {
+      this.sendSnapshot(server);
+      this.runBackground('do_viewer_expiry', this.scheduleExpiryAlarm(now));
+      if (activeViewersBefore === 0) {
+        this.runBackground('do_agent_policy', this.broadcastAgentPolicy(now, true));
+      }
+    } else {
+      this.runBackground('do_agent_policy', this.sendCurrentPolicyToAgent(server, now, false, false, clientId));
+    }
+
+    const requestedProtocols = (request.headers.get('Sec-WebSocket-Protocol') || '')
+      .split(',')
+      .map(protocol => protocol.trim());
+    const headers = requestedProtocols.includes(LIVE_VIEWER_WS_PROTOCOL)
+      ? { 'Sec-WebSocket-Protocol': LIVE_VIEWER_WS_PROTOCOL }
+      : undefined;
+    return new Response(null, { status: 101, webSocket: client, headers });
+  }
+
   private async handleMessage(clientId: string, clientName: string, hidden: boolean, data: Record<string, unknown>, ws: WebSocket) {
+    if (!this.isCurrentAgentSession(ws, clientId)) return;
+    let batch: JsonObject[] | undefined;
+    if (data.type === 'reports') {
+      if (!isReportBatch(data.reports, AGENT_REPORT_MAX_BATCH)) throw new Error('Invalid report batch');
+      batch = data.reports;
+    }
+    if (data.type === 'report' && !isObjectPayload(data.data)) throw new Error('Invalid report envelope');
     if (data?.type === 'ping_result') {
       await this.resolveReportClientControl(clientId, clientName, hidden);
+      if (!this.isCurrentAgentSession(ws, clientId)) return;
       this.runBackground('ping_persistence', this.persistPingResult(clientId, data, Date.now()));
       return;
     }
 
     return this.runClientReport(clientId, async lifecycle => {
+      if (!this.isCurrentAgentSession(ws, clientId)) throw new Error('Agent session retired');
       const now = lifecycle.receivedAt;
       const control = await this.resolveReportClientControl(clientId, clientName, hidden);
       this.assertReportCurrent(lifecycle);
       clientName = control.name;
       hidden = control.hidden;
-      const reports = data?.type === 'reports' && Array.isArray(data.reports)
-        ? data.reports.slice(0, AGENT_REPORT_MAX_BATCH).filter(isObjectPayload)
-        : [unwrapMonitorReportEnvelope(data)];
+      const reports = batch || [unwrapMonitorReportEnvelope(data)];
+      const upgradeReceipts = collectUpgradeReceipts(reports, data);
       const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
       for (let index = 0; index < reports.length; index += 1) {
         this.assertReportCurrent(lifecycle);
@@ -2352,9 +2462,13 @@ export class LiveDataDO {
         await this.syncBasicInfoFromReport(clientId, clientName, hidden, basicInfoReport, lifecycle);
       }
       this.assertReportCurrent(lifecycle);
-      if (this.sessions.get(clientId) === ws && ws.readyState === WebSocket.READY_STATE_OPEN) {
+      const receiptDatabase = this.getQueryDatabase();
+      const acceptedUpgradeIds = receiptDatabase
+        ? await persistUpgradeReceipts(receiptDatabase, clientId, upgradeReceipts) : [];
+      this.assertReportCurrent(lifecycle);
+      if (this.isCurrentAgentSession(ws, clientId)) {
         try {
-          ws.send(JSON.stringify({ type: 'ack', timestamp: now }));
+          ws.send(JSON.stringify({ type: 'ack', timestamp: now, accepted_upgrade_ids: acceptedUpgradeIds }));
         } catch {
           // 忽略 ack 发送错误
         }
@@ -2364,31 +2478,64 @@ export class LiveDataDO {
     });
   }
 
+  private rejectAgentIngress(ws: WebSocket, attachment: SessionAttachment, oversized: boolean): void {
+    if (this.isCurrentAgentSession(ws, attachment.clientId)) {
+      try { ws.send(JSON.stringify({ type: 'error',
+        code: oversized ? 'REPORT_TOO_LARGE' : 'REPORT_BACKPRESSURE',
+        error: oversized ? 'Report exceeds the wire size limit' : 'Report capacity is busy; retry later',
+        retry_after: oversized ? 60 : 5,
+      })); } catch {}
+    }
+    const code = oversized ? 1009 : 1013;
+    const reason = oversized ? 'Message too large' : 'Report backpressure';
+    try { this.retireAgentSession(ws, attachment, code, reason); }
+    catch { try { ws.close(code, reason); } catch {} }
+    this.cleanupSession(ws, attachment);
+  }
+
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
-    await this.httpClientsReady;
+    // Reserve before the first await or JSON.parse. Startup/storage delays are
+    // part of the retained workload, not an excuse for an unbounded input queue.
     const attachment = this.getSessionAttachment(ws);
     if (!attachment || attachment.role !== 'agent') return;
-    const messageBytes = typeof message === 'string'
-      ? new TextEncoder().encode(message).byteLength
-      : message.byteLength;
-    if (messageBytes > AGENT_WS_MAX_MESSAGE_BYTES) {
-      try {
-        ws.close(1009, 'Message too large');
-      } catch {
-        // Ignore close errors.
-      }
+    if (!this.isCurrentAgentSession(ws, attachment.clientId)) {
+      try { this.retireAgentSession(ws, attachment); } catch {}
+      this.cleanupSession(ws, attachment);
       return;
     }
+    if ((typeof message === 'string' ? message.length : message.byteLength) > AGENT_WS_MAX_MESSAGE_BYTES) {
+      this.rejectAgentIngress(ws, attachment, true);
+      return;
+    }
+    const messageBytes = typeof message === 'string'
+      ? new TextEncoder().encode(message).byteLength : message.byteLength;
+    if (messageBytes > AGENT_WS_MAX_MESSAGE_BYTES) {
+      this.rejectAgentIngress(ws, attachment, true);
+      return;
+    }
+    const lease = this.agentPendingIngress.tryReserve(attachment.clientId, messageBytes);
+    if (!lease) { this.rejectAgentIngress(ws, attachment, false); return; }
+    const work: AgentIngressWork = { pending: new Set() };
     try {
-      const data = JSON.parse(typeof message === 'string' ? message : new TextDecoder().decode(message));
-      if (!isObjectPayload(data)) return;
-      await this.handleMessage(attachment.clientId, attachment.clientName, attachment.hidden, data, ws);
-    } catch {
-      // A rejected report must be observable by the Agent rather than looking
-      // like a successfully accepted message with missing history.
-      if (ws.readyState === WebSocket.READY_STATE_OPEN) {
-        try { ws.send(JSON.stringify({ type: 'error', code: 'REPORT_REJECTED', error: 'Invalid or unsupported Agent report' })); } catch {}
-      }
+      await this.agentIngressContext.run(work, async () => {
+        try {
+          await this.httpClientsReady;
+          if (!this.isCurrentAgentSession(ws, attachment.clientId)) return;
+          const data = JSON.parse(typeof message === 'string' ? message : new TextDecoder().decode(message));
+          if (!isObjectPayload(data)) throw new Error('Invalid report object');
+          await this.handleMessage(attachment.clientId, attachment.clientName, attachment.hidden, data, ws);
+        } catch {
+          if (this.isCurrentAgentSession(ws, attachment.clientId)) {
+            try { ws.send(JSON.stringify({ type: 'error', code: 'REPORT_REJECTED', error: 'Invalid or unsupported Agent report' })); } catch {}
+          }
+        } finally {
+          // Include runBackground descendants (network metadata, legacy ping,
+          // policy and history). ACK does not release their retained payload.
+          while (work.pending.size > 0) await Promise.allSettled([...work.pending]);
+        }
+      });
+    } finally {
+      lease.release();
     }
   }
 

@@ -12,7 +12,7 @@ async function reportDiskTotal(path, diskTotal) {
     clients: [structuredClone(row)], updatedAt: Date.now() - 1, removed: [], complete: true,
   }]]);
   const loader = createWorkerLoader({ db: {
-    getClientByToken: async () => structuredClone(row), getClient: async () => structuredClone(row),
+    getClientByToken: async () => structuredClone(row), getClientIdentityByToken: async () => structuredClone(row), getClient: async () => structuredClone(row),
     getSettingsByKeys: async () => ({ record_enabled: 'false' }), getSetting: async () => null,
     updateClient: async (_database, _uuid, patch) => { row = { ...row, ...patch }; },
     markClientTokenUsed: async () => false, listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],

@@ -409,20 +409,23 @@ type reportsEnvelope struct {
 }
 
 type serverMessage struct {
-	Type              string             `json:"type"`
-	Timestamp         int64              `json:"timestamp,omitempty"`
-	Mode              string             `json:"mode,omitempty"`
-	SampleIntervalSec int                `json:"sample_interval_sec,omitempty"`
-	ReportIntervalSec int                `json:"report_interval_sec,omitempty"`
-	PingIntervalSec   int                `json:"ping_interval_sec,omitempty"`
-	PingPolicyVersion string             `json:"ping_policy_version,omitempty"`
-	PingTasks         []PingTask         `json:"ping_tasks,omitempty"`
-	WebsiteProbeTasks []WebsiteProbeTask `json:"website_probe_tasks,omitempty"`
-	ReportNow         bool               `json:"report_now,omitempty"`
-	ViewerCount       int                `json:"viewer_count,omitempty"`
-	ViewerTTLSec      int                `json:"viewer_ttl_sec,omitempty"`
-	PolicyTTL         int                `json:"policy_ttl_sec,omitempty"`
-	IdlePolicyTTL     int                `json:"idle_policy_ttl_sec,omitempty"`
+	AcceptedUpgradeIDs upgradeReceiptIDs  `json:"accepted_upgrade_ids,omitempty"`
+	Code               string             `json:"code,omitempty"`
+	RetryAfterSec      int                `json:"retry_after,omitempty"`
+	Type               string             `json:"type"`
+	Timestamp          int64              `json:"timestamp,omitempty"`
+	Mode               string             `json:"mode,omitempty"`
+	SampleIntervalSec  int                `json:"sample_interval_sec,omitempty"`
+	ReportIntervalSec  int                `json:"report_interval_sec,omitempty"`
+	PingIntervalSec    int                `json:"ping_interval_sec,omitempty"`
+	PingPolicyVersion  string             `json:"ping_policy_version,omitempty"`
+	PingTasks          []PingTask         `json:"ping_tasks,omitempty"`
+	WebsiteProbeTasks  []WebsiteProbeTask `json:"website_probe_tasks,omitempty"`
+	ReportNow          bool               `json:"report_now,omitempty"`
+	ViewerCount        int                `json:"viewer_count,omitempty"`
+	ViewerTTLSec       int                `json:"viewer_ttl_sec,omitempty"`
+	PolicyTTL          int                `json:"policy_ttl_sec,omitempty"`
+	IdlePolicyTTL      int                `json:"idle_policy_ttl_sec,omitempty"`
 	// 指针：字段缺席表示「后台没有这个节点的重置日」，此时保留本地取值，
 	// 不能被一个默认 1 悄悄改掉安装时指定的 --traffic-reset-day。
 	TrafficResetDay *int `json:"traffic_reset_day,omitempty"`
@@ -1259,6 +1262,20 @@ func runHTTPReporter() {
 	currentUploadInterval := currentSampleInterval
 	nextUploadAt := time.Now()
 	var pending []Report
+	var retryNotBefore time.Time
+	flush := func() {
+		now := time.Now()
+		if now.Before(retryNotBefore) || len(pending) == 0 {
+			return
+		}
+		if err := deliverHTTPReports(pingState, pending); err != nil {
+			retryNotBefore = time.Now().Add(reportDeliveryRetryDelay(err, max(currentUploadInterval, 5*time.Second)))
+		} else {
+			retryNotBefore = time.Time{}
+		}
+		pending = nil
+		nextUploadAt = time.Now().Add(currentUploadInterval)
+	}
 
 	// Policy caching — only refetch when TTL expires.
 	// On first cycle policyExpiresAt is zero so we fetch immediately.
@@ -1301,26 +1318,22 @@ func runHTTPReporter() {
 				}
 				if policy.ReportNow {
 					pending = append(pending, prepareReportsWithPing(preparer, pingState, currentSampleInterval)...)
-					_ = deliverHTTPReports(pingState, pending)
-					pending = nil
-					nextUploadAt = time.Now().Add(currentUploadInterval)
+					flush()
 				}
 			} else {
 				log.Printf("HTTP policy fetch failed: %v", err)
 				// Keep current policy but force a short retry.
+				baseRetry := time.Minute
 				if policyExpiresAt.IsZero() {
-					policyExpiresAt = time.Now().Add(30 * time.Second)
-				} else {
-					policyExpiresAt = time.Now().Add(60 * time.Second)
+					baseRetry = 30 * time.Second
 				}
+				policyExpiresAt = time.Now().Add(reportDeliveryRetryDelay(err, baseRetry))
 			}
 		}
 
 		pending = append(pending, prepareReportsWithPing(preparer, pingState, currentSampleInterval)...)
 		if currentUploadInterval <= currentSampleInterval || !time.Now().Before(nextUploadAt) {
-			_ = deliverHTTPReports(pingState, pending)
-			pending = nil
-			nextUploadAt = time.Now().Add(currentUploadInterval)
+			flush()
 		}
 		time.Sleep(currentSampleInterval)
 	}
@@ -1357,16 +1370,14 @@ func runWebSocketReporter() {
 		if err != nil {
 			log.Printf("WebSocket session ended: %v", err)
 		}
-		log.Printf("reconnecting in %ds", reconnectInterval)
-		time.Sleep(time.Duration(reconnectInterval) * time.Second)
+		delay := webSocketReconnectDelay(err)
+		log.Printf("reconnecting in %s", delay)
+		time.Sleep(delay)
 	}
 }
 
 func webSocketReconnectDelay(err error) time.Duration {
-	if err != nil && (strings.HasPrefix(err.Error(), "401 ") || strings.HasPrefix(err.Error(), "403 ")) {
-		return 10 * time.Minute
-	}
-	return time.Duration(reconnectInterval) * time.Second
+	return reportDeliveryRetryDelay(err, time.Duration(reconnectInterval)*time.Second)
 }
 
 func runWebSocketSession(
@@ -1386,7 +1397,7 @@ func runWebSocketSession(
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 2) // Reader and heartbeat each send at most one failure.
 	policies := make(chan serverMessage, 8)
-	acks := make(chan struct{}, 1)
+	acks := make(chan serverMessage, 1)
 	var socketWorkers sync.WaitGroup
 	socketWorkers.Add(2)
 	go func() {
@@ -1438,11 +1449,15 @@ func runWebSocketSession(
 		for len(acks) > 0 {
 			<-acks
 		}
-		count := min(len(pending), maxReportsPerEnvelope)
-		inFlight = pingState.currentReportResults(pending[:count])
-		pending = pending[count:]
+		candidates := pingState.currentReportResults(pending[:min(len(pending), maxReportsPerEnvelope)])
+		batch, err := prepareReportBatch(candidates, reportWebSocket, upgradeRuntime.snapshot())
+		if err != nil {
+			return err
+		}
+		inFlight = batch.reports
+		pending = pending[len(batch.reports):]
 		uploadReady = len(pending) > 0
-		if err := sendWebSocketReports(conn, inFlight); err != nil {
+		if err := sendWebSocketReports(conn, batch); err != nil {
 			return err
 		}
 		// Pong proves socket liveness; only ACK accepts this report batch.
@@ -1476,11 +1491,11 @@ func runWebSocketSession(
 				return err
 			}
 			resetTimer(uploadTimer, currentUploadInterval)
-		case <-acks:
+		case acknowledgement := <-acks:
 			if len(inFlight) > 0 {
 				stopAckTimer()
 				pingState.acknowledgeReports(inFlight)
-				upgradeRuntime.acknowledge()
+				upgradeRuntime.acknowledge(inFlight, acknowledgement.AcceptedUpgradeIDs)
 				reportUpgradeHealth()
 				inFlight = nil
 				if err := flush(); err != nil {
@@ -3222,22 +3237,18 @@ func (p *reportPreparer) attachBasicInfoIfDue(report *Report, now time.Time) {
 	}
 }
 
-func sendHTTPReports(reports []Report) error {
-	if len(reports) == 0 {
+func sendHTTPReports(batch preparedReportBatch) error {
+	if len(batch.reports) == 0 && len(batch.body) == 0 {
 		return nil
 	}
-	if len(reports) > maxReportsPerEnvelope {
-		return fmt.Errorf("report envelope exceeds %d reports", maxReportsPerEnvelope)
+	if err := batch.validate(reportHTTP); err != nil {
+		return err
 	}
-	attachUpgradeResults(reports)
+	reports := batch.reports
 	endpoint := serverURL + "/api/clients/report"
-	payload := any(reports[0])
-	if len(reports) > 1 {
-		payload = map[string]any{"reports": reports}
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	resp, err := postJSONResponse(ctx, endpoint, payload, token)
+	resp, err := postJSONBytesResponse(ctx, endpoint, batch.body, token)
 	if err != nil {
 		log.Printf("HTTP report failed: %v", err)
 		return err
@@ -3246,7 +3257,10 @@ func sendHTTPReports(reports []Report) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return httpStatusError(resp)
 	}
-	var accepted struct{ Success bool }
+	var accepted struct {
+		Success            bool              `json:"success"`
+		AcceptedUpgradeIDs upgradeReceiptIDs `json:"accepted_upgrade_ids"`
+	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxHTTPErrorBodyBytes)).Decode(&accepted); err != nil {
 		return fmt.Errorf("invalid report acknowledgement: %w", err)
 	}
@@ -3255,7 +3269,7 @@ func sendHTTPReports(reports []Report) error {
 	}
 	// The server accepted this batch: consume any upgrade results it carried and
 	// record the health beacon so a supervisor can confirm the restart.
-	upgradeRuntime.acknowledge()
+	upgradeRuntime.acknowledge(reports, accepted.AcceptedUpgradeIDs)
 	reportUpgradeHealth()
 	if len(reports) == 1 {
 		logReport("HTTP report accepted", reports[0])
@@ -3300,22 +3314,21 @@ func fetchAgentPolicy() (agentPolicy, error) {
 	return policy, nil
 }
 
-func sendWebSocketReports(conn *safeWebSocketConn, reports []Report) error {
-	if len(reports) == 0 {
+func sendWebSocketReports(conn *safeWebSocketConn, batch preparedReportBatch) error {
+	if len(batch.reports) == 0 && len(batch.body) == 0 {
 		return nil
 	}
-	attachUpgradeResults(reports)
-	if len(reports) == 1 {
-		if err := conn.WriteJSON(reportEnvelope{Type: "report", Data: reports[0]}); err != nil {
-			return err
-		}
-		logReport("WebSocket report sent", reports[0])
-		return nil
-	}
-	if err := conn.WriteJSON(reportsEnvelope{Type: "reports", Reports: reports}); err != nil {
+	if err := batch.validate(reportWebSocket); err != nil {
 		return err
 	}
-	log.Printf("WebSocket report batch sent: %d reports", len(reports))
+	if err := conn.WriteMessage(websocket.TextMessage, batch.body); err != nil {
+		return err
+	}
+	if len(batch.reports) == 1 {
+		logReport("WebSocket report sent", batch.reports[0])
+	} else {
+		log.Printf("WebSocket report batch sent: %d reports", len(batch.reports))
+	}
 	return nil
 }
 
@@ -3360,7 +3373,11 @@ func postJSONResponse(ctx context.Context, endpoint string, data interface{}, be
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(body))
+	return postJSONBytesResponse(ctx, endpoint, body, bearerToken)
+}
+
+func postJSONBytesResponse(ctx context.Context, endpoint string, body []byte, bearerToken string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -3378,14 +3395,11 @@ func httpStatusError(resp *http.Response) error {
 	if truncated {
 		respBody = respBody[:maxHTTPErrorBodyBytes]
 	}
-	detail := strings.TrimSpace(string(respBody))
-	if detail == "" {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	return &httpStatusResponseError{
+		statusCode: resp.StatusCode,
+		retryAfter: parseReportRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		detail:     strings.TrimSpace(string(respBody)), truncated: truncated,
 	}
-	if truncated {
-		return fmt.Errorf("HTTP %d: %s...(truncated)", resp.StatusCode, detail)
-	}
-	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, detail)
 }
 
 func normalizeServerURL(raw string) (string, error) {
@@ -3484,7 +3498,7 @@ func connectWebSocket(endpoint string, agentToken string) (*safeWebSocketConn, e
 	return &safeWebSocketConn{conn: conn}, nil
 }
 
-func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies chan<- serverMessage, acknowledgements ...chan<- struct{}) {
+func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies chan<- serverMessage, acknowledgements ...chan<- serverMessage) {
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
@@ -3494,8 +3508,12 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 
 		var message serverMessage
 		if err := json.Unmarshal(raw, &message); err != nil {
-			log.Printf("WebSocket message: %s", string(raw))
+			log.Printf("Invalid WebSocket message prefix: %q", string(raw[:min(len(raw), 1024)]))
 			continue
+		}
+		if message.Type == "error" {
+			done <- reportRejectionFromMessage(message)
+			return
 		}
 		if message.Type == "ack" || message.Type == "policy" {
 			if err := conn.renewReadDeadline(); err != nil {
@@ -3507,7 +3525,7 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 			log.Printf("WebSocket ack received: %d", message.Timestamp)
 			if len(acknowledgements) > 0 {
 				select {
-				case acknowledgements[0] <- struct{}{}:
+				case acknowledgements[0] <- message:
 				default:
 				}
 			}
@@ -3521,6 +3539,6 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 			}
 			continue
 		}
-		log.Printf("WebSocket message type=%s", message.Type)
+		log.Printf("WebSocket message type=%q", message.Type[:min(len(message.Type), 128)])
 	}
 }

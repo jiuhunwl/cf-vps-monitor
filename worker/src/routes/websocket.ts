@@ -9,6 +9,7 @@ import * as db from '../db/queries';
 import { getDatabase } from '../db/provider';
 import { createViewerToken, verifyViewerToken } from '../auth/viewer-token';
 import { getAgentClientIdentityByToken } from './client';
+import { isAgentTokenShape } from '../utils/client';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { hasAdminSession, invalidatePublicMetadataCache } from './public';
@@ -244,8 +245,12 @@ wsRoutes.get('/clients/report', async (c) => {
     return c.json({ error: 'Missing token' }, 401);
   }
 
+  if (!isAgentTokenShape(token)) return c.json({ error: 'Invalid token' }, 401);
   const database = getDatabase(c.env);
-  const client = await getAgentClientIdentityByToken(database, token, c.env, getCloudflareClientIp(c, ''));
+  const client = await getAgentClientIdentityByToken(
+    database, token, c.env, getCloudflareClientIp(c, ''), undefined, undefined,
+    { fresh: true, signal: AbortSignal.timeout(10_000) },
+  );
   if (!client) {
     return c.json({ error: 'Invalid token' }, 401);
   }
@@ -294,7 +299,10 @@ wsRoutes.get('/clients/report', async (c) => {
   if (sourceIpIsPublic) url.searchParams.set('source_ip', sourceIp);
   if (region) url.searchParams.set('region', region);
 
-  return stub.fetch(new Request(url.toString(), c.req.raw));
+  const headers = new Headers(c.req.raw.headers);
+  // Preserve legacy query-token clients without sending credentials in a URL.
+  headers.set('Authorization', `Bearer ${token}`);
+  return stub.fetch(new Request(url.toString(), { method: 'GET', headers }));
 });
 
 wsRoutes.get('/ws/live-token', async (c) => {

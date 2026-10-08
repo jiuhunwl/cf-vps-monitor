@@ -1703,12 +1703,13 @@ publicRoutes.get('/live', async (c) => {
 
   const doId = c.env.LIVE_DATA.idFromName('global');
   const stub = c.env.LIVE_DATA.get(doId);
-  const doUrl = new URL(c.req.url);
-  if (includeHidden) doUrl.searchParams.set('include_hidden', '1');
-  else doUrl.searchParams.delete('include_hidden');
+  // This public endpoint may read snapshots, never manage DO WebSocket sessions.
+  // Do not forward external headers or role/id parameters across that boundary.
+  const snapshotRequest = new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' });
+  const snapshotResponse = await stub.fetch(snapshotRequest);
   const response = includeHidden
-    ? privateJsonResponse(await (await stub.fetch(new Request(doUrl.toString(), c.req.raw))).json())
-    : withPublicCacheHeader(c, await stub.fetch(new Request(doUrl.toString(), c.req.raw)), PUBLIC_LIVE_CACHE_SECONDS, 'miss');
+    ? privateJsonResponse(await snapshotResponse.json())
+    : withPublicCacheHeader(c, snapshotResponse, PUBLIC_LIVE_CACHE_SECONDS, 'miss');
   if (!includeHidden) putPublicEdgeCache(c, response);
   return response;
 });

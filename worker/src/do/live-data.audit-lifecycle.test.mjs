@@ -104,7 +104,7 @@ test('AUD-32: hidden metadata and explicit removal cannot resurrect old HTTP sta
 
 test('AUD-35: a legal large report still acknowledges, persists and restores within attachment limits', async () => {
   const f = fixture({ recordEnabled: true });
-  const socket = createSocket({ role: 'agent', clientId: 'node', clientName: 'fixture', hidden: false });
+  const socket = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: 'node', clientName: 'fixture', hidden: false });
   f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
   f.state.sockets.push(socket.ws);
   const report = {
@@ -135,7 +135,7 @@ async function offline(object) {
 
 test('AUD-37: slow and out-of-order Agent timestamps cannot make a freshly received report offline', async () => {
   const f = fixture();
-  const socket = createSocket({ role: 'agent', clientId: 'node', clientName: 'fixture', hidden: false });
+  const socket = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: 'node', clientName: 'fixture', hidden: false });
   f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
   f.state.sockets.push(socket.ws);
   await f.object.webSocketMessage(socket.ws, JSON.stringify({ type: 'report', data: { cpu: 17, timestamp: f.now - 3600000 } }));

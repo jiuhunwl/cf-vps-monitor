@@ -22,3 +22,11 @@ assert.deepEqual(
   unwrapMonitorReportEnvelope({ type: 'report', data: null, ping_results: [] }),
   { type: 'report', data: null, ping_results: [] },
 );
+
+
+const { isReportBatch } = await import('../utils/report-envelope.ts');
+assert.equal(isReportBatch([report], 300), true);
+assert.equal(isReportBatch(Array.from({ length: 300 }, () => report), 300), true);
+for (const invalid of [[], null, new Array(2), [report, null], Array.from({ length: 301 }, () => report)]) {
+  assert.equal(isReportBatch(invalid, 300), false);
+}

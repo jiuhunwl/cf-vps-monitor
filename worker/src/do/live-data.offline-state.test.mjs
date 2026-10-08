@@ -38,7 +38,7 @@ function fixture({ initial = [], controls = [node], dbOverrides = {} } = {}) {
     get now() { return now; }, advance(ms) { now += ms; },
     cold: () => new LiveDataDO(storage.state, {}),
     agent(uuid = 'node') {
-      const socket = createSocket({ role: 'agent', clientId: uuid, clientName: 'Agent supplied name', hidden: false });
+      const socket = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: uuid, clientName: 'Agent supplied name', hidden: false });
       object.registerSession(socket.ws, socket.ws.deserializeAttachment());
       storage.sockets.push(socket.ws);
       return socket;
@@ -155,7 +155,7 @@ test('legacy HTTP entries retain their TTL while expired entries remain displaya
 test('cold reconstruction keeps a newer HTTP fallback measurement over an older live socket attachment', async () => {
   const f = fixture();
   await httpReport(f, { cpu: 31, disk: null, disk_total: 5024_000_000 });
-  const socket = createSocket({ role: 'agent', clientId: 'node', clientName: node.name, hidden: false,
+  const socket = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: 'node', clientName: node.name, hidden: false,
     lastReportTime: f.now - 1000, lastReport: { cpu: 12, disk: 100, disk_total: 983_000_000_000 },
   });
   f.storage.sockets.push(socket.ws);

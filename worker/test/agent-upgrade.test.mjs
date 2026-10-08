@@ -6,7 +6,7 @@
  *      （这里用纯逻辑模拟「RPC 返回 skipped」验证前端契约解析）。
  *   2) 交叉校验：success 但 final_version != target_version → unverified（SQL 层）。
  *   3) 失败/回滚类不改版本语义（SQL 层）。
- *   4) upgrade_results 落库失败不影响 /report 主链路（extractUpgradeResults + 吞错）。
+ *   4) upgrade_results 落库失败不影响 /report 主链路（生产receipt helper）。
  *   5) upgradeTasksForPolicy 只下发 {id, target_version}，绝不包含 release_base/proxy/ghproxy。
  *
  * SQL 层语义（1-3）在本机无 Supabase 连接时无法直接跑 —— 这些由 SQL 函数体本身的
@@ -15,6 +15,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createWorkerLoader } from '../test-support/worker-module.mjs';
 
 import { resolveReleaseRepository, __clearAgentReleaseCacheForTests } from '../src/utils/agent-release.ts';
 
@@ -65,111 +66,26 @@ test('AgentUpgradeTask 契约只含 id 与 target_version，无 release_base/pro
 });
 
 /* ------------------------------------------------------------------ */
-/* 回执解析与去重（模拟 /report 内 extractUpgradeResults 的行为）       */
+/* 回执解析与明确确认（调用生产 helper）       */
 /* ------------------------------------------------------------------ */
 
-// 复刻 client.ts 中 extractUpgradeResults 的纯逻辑（避免拉入整个 Hono 上下文）。
-function extractUpgradeResults(body) {
-  if (!body || typeof body !== 'object') return [];
-  const raw = body.upgrade_results;
-  if (!Array.isArray(raw)) return [];
-  const seen = new Set();
-  const results = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const commandId = typeof item.command_id === 'string' ? item.command_id : '';
-    if (!commandId || seen.has(commandId)) continue;
-    seen.add(commandId);
-    results.push({
-      command_id: commandId,
-      target_version: typeof item.target_version === 'string' ? item.target_version : '',
-      from_version: typeof item.from_version === 'string' ? item.from_version : '',
-      final_version: typeof item.final_version === 'string' ? item.final_version : '',
-      status: ['success', 'already_latest', 'rolled_back', 'failed'].includes(item.status) ? item.status : 'failed',
-      failure_code: typeof item.failure_code === 'string' ? item.failure_code : undefined,
-      reason: typeof item.reason === 'string' ? item.reason : undefined,
-    });
-  }
-  return results;
-}
-
-test('extractUpgradeResults 按 command_id 去重，重复回执只保留首条', () => {
-  const results = extractUpgradeResults({
-    upgrade_results: [
-      { command_id: 'cmd-1', status: 'success', target_version: 'v1.0.2', from_version: 'v1.0.1', final_version: 'v1.0.2' },
-      { command_id: 'cmd-1', status: 'failed', target_version: 'v1.0.2' },  // 重复，丢弃
-      { command_id: 'cmd-2', status: 'rolled_back', target_version: 'v1.0.2' },
-    ],
-  });
-  assert.equal(results.length, 2);
-  assert.equal(results[0].command_id, 'cmd-1');
-  assert.equal(results[0].status, 'success');  // 首条胜出
-  assert.equal(results[1].command_id, 'cmd-2');
+// Use the production collector/persistence boundary instead of duplicating old code.
+test('production upgrade receipt parser rejects invalid status rather than inventing failed', () => {
+  const { collectUpgradeReceipts } = createWorkerLoader({ db: {} }).load('worker/src/utils/upgrade-receipts.ts');
+  assert.equal(collectUpgradeReceipts([{ upgrade_results: [{
+    command_id: '00000000-0000-4000-8000-000000000001', status: 'bogus_status',
+  }] }]).length, 0);
 });
-
-test('extractUpgradeResults 对缺失/非法 status 兜底为 failed', () => {
-  const results = extractUpgradeResults({
-    upgrade_results: [
-      { command_id: 'cmd-x', status: 'bogus_status' },
-      { command_id: 'cmd-y' },  // 完全缺 status
-    ],
-  });
-  assert.equal(results[0].status, 'failed');
-  assert.equal(results[1].status, 'failed');
-});
-
-test('extractUpgradeResults 对非数组 upgrade_results 返回空，不抛异常', () => {
-  assert.deepEqual(extractUpgradeResults({ upgrade_results: null }), []);
-  assert.deepEqual(extractUpgradeResults({ upgrade_results: 'not-an-array' }), []);
-  assert.deepEqual(extractUpgradeResults({}), []);
-  assert.deepEqual(extractUpgradeResults(null), []);
-  assert.deepEqual(extractUpgradeResults(undefined), []);
-});
-
-test('extractUpgradeResults 过滤掉无 command_id 的项', () => {
-  const results = extractUpgradeResults({
-    upgrade_results: [
-      { command_id: '', status: 'success' },
-      { status: 'success' },
-      { command_id: 'valid', status: 'success', target_version: 'v1.0.2' },
-    ],
-  });
-  assert.equal(results.length, 1);
-  assert.equal(results[0].command_id, 'valid');
-});
-
-/* ------------------------------------------------------------------ */
-/* 落库失败不影响主上报链路                                            */
-/* ------------------------------------------------------------------ */
-
-test('persistUpgradeResults 吞掉单条失败，继续处理后续回执', async () => {
-  // 模拟 client.ts 中 persistUpgradeResults 的语义：失败只记日志，不抛错
-  const persisted = [];
-  const failed = [];
-  const mockRecordFn = (result) => {
-    if (result.command_id === 'cmd-fail') {
-      return Promise.reject(new Error('RPC down'));
-    }
-    persisted.push(result.command_id);
-    return Promise.resolve({ ok: true });
-  };
-  // 复刻 persistUpgradeResults 的循环+吞错语义
-  const results = [
-    { command_id: 'cmd-ok-1', target_version: 'v1.0.2', status: 'success' },
-    { command_id: 'cmd-fail', target_version: 'v1.0.2', status: 'failed' },
-    { command_id: 'cmd-ok-2', target_version: 'v1.0.2', status: 'success' },
-  ];
-  for (const result of results) {
-    try {
-      await mockRecordFn(result);
-    } catch (e) {
-      failed.push(result.command_id);
-      // 不重抛
-    }
-  }
-  // 失败的那条被记下，但不阻塞其余两条落库
-  assert.deepEqual(failed, ['cmd-fail']);
-  assert.deepEqual(persisted, ['cmd-ok-1', 'cmd-ok-2']);
+test('production upgrade persistence returns only explicit confirmations while isolating failures', async () => {
+  const loader = createWorkerLoader({ db: { recordAgentUpgradeResult: async (_db, receipt) => {
+    if (receipt.command_id.endsWith('2')) throw new Error('synthetic failure');
+    return { ok: true };
+  } } });
+  const { collectUpgradeReceipts, persistUpgradeReceipts } = loader.load('worker/src/utils/upgrade-receipts.ts');
+  const receipts = collectUpgradeReceipts([{ upgrade_results: [1, 2].map(n => ({
+    command_id: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`, status: 'success',
+  })) }]);
+  assert.deepEqual([...await persistUpgradeReceipts(loader.database, 'trusted-node', receipts)], ['00000000-0000-4000-8000-000000000001']);
 });
 
 /* ------------------------------------------------------------------ */

@@ -60,7 +60,7 @@ async function fixture({ sameUuid = false, removed = false, includeClients = tru
   const report = await doRequest('/client-report', { uuid: previous.uuid, name: previous.name, hidden: false, report: { cpu: 12 }, ttl_ms: 120000 });
   assert.equal(report.status, 200, 'precondition: the previous HTTP live state exists');
   assert.equal(state.values.has(`http-live:${previous.uuid}`), true);
-  const agent = createSocket({ role: 'agent', clientId: previous.uuid, clientName: previous.name, hidden: false,
+  const agent = createSocket({ role: 'agent', agentAuthVersion: 1, clientId: previous.uuid, clientName: previous.name, hidden: false,
     lastReport: { cpu: 12 }, lastReportTime: Date.now() });
   object.registerSession(agent.ws, agent.ws.deserializeAttachment());
   state.sockets.push(agent.ws);
