@@ -6528,6 +6528,13 @@ create index if not exists idx_agent_upgrade_commands_client
 create index if not exists idx_agent_upgrade_commands_created
   on agent_upgrade_commands (created_at desc);
 
+-- Upgrade commands carry node-management authority. Restrict this table itself,
+-- not only the RPCs: shared Supabase defaults must not expose a writable queue.
+alter table public.agent_upgrade_commands enable row level security;
+alter table public.agent_upgrade_commands force row level security;
+revoke all on table public.agent_upgrade_commands from public, anon, authenticated;
+grant select, insert, update, delete on table public.agent_upgrade_commands to service_role;
+
 -- Unknown key formats have no inferred owner. Known formats retain the complete
 -- client ID after their structural prefix, including any additional colons.
 create or replace function cfm_internal.notification_delivery_entity_exists(input_key text, input_lock boolean default false)
@@ -7203,6 +7210,9 @@ revoke all on function public.cfm_list_agent_upgrade_commands(jsonb) from public
 grant execute on function public.cfm_list_agent_upgrade_commands(jsonb) to service_role;
 revoke all on function public.cfm_expire_agent_upgrade_commands(timestamptz, int) from public, anon, authenticated;
 grant execute on function public.cfm_expire_agent_upgrade_commands(timestamptz, int) to service_role;
+
+-- Refresh PostgREST only after the upgrade RPC signatures have been installed.
+notify pgrst, 'reload schema';
 
 -- ################################################################
 -- # 迁移文件: 5_runtime_defaults.sql

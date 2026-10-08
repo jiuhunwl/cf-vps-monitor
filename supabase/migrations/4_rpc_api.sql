@@ -5896,6 +5896,13 @@ create index if not exists idx_agent_upgrade_commands_client
 create index if not exists idx_agent_upgrade_commands_created
   on agent_upgrade_commands (created_at desc);
 
+-- Upgrade commands carry node-management authority. Restrict this table itself,
+-- not only the RPCs: shared Supabase defaults must not expose a writable queue.
+alter table public.agent_upgrade_commands enable row level security;
+alter table public.agent_upgrade_commands force row level security;
+revoke all on table public.agent_upgrade_commands from public, anon, authenticated;
+grant select, insert, update, delete on table public.agent_upgrade_commands to service_role;
+
 -- 面板下发：为若干节点创建升级命令。
 -- 每节点同时只允许 1 条未决命令（queued/dispatched/running），重复创建计入 skipped。
 -- target_version 必须是已固化的具体 tag；RPC 不接受 "latest"（由 Worker 侧解析）。
@@ -6170,3 +6177,6 @@ end;
 $$;
 revoke all on function public.cfm_expire_agent_upgrade_commands(timestamptz, int) from public, anon, authenticated;
 grant execute on function public.cfm_expire_agent_upgrade_commands(timestamptz, int) to service_role;
+
+-- Refresh PostgREST only after the upgrade RPC signatures have been installed.
+notify pgrst, 'reload schema';
