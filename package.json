@@ -20,7 +20,7 @@
     "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
     "build:migrations": "node scripts/generate-migrations.mjs",
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
-    "test:js": "node --test",
+    "test:js": "node --test --test-reporter=spec --test-reporter=./scripts/github-reporter.mjs --test-reporter-destination=stdout --test-reporter-destination=stdout",
     "test:go": "cd agent && go test ./...",
     "test": "npm run test:js && npm run test:go",
     "security:check": "node scripts/security-check.mjs",
