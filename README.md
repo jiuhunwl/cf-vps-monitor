@@ -48,7 +48,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ## 面板部署
 
-在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.8`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
+在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.9`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
 
 ### Fork 本仓库部署【推荐，方便更新】
 
@@ -216,7 +216,7 @@ Windows 节点**不能由 Agent 自身替换**（运行中的 `.exe` 文件无�
 
 **注意：**手动引导会替换二进制并重启 Agent，请先备份原配置并核对自定义参数；无法找到原安装或必要连接配置时会停止。关闭远程升级弹窗只停止本窗口后续批次和轮询，**不会撤销已下发任务**。手动升级目标应与待执行任务一致；有任务正在执行时请先等待其结束。
 
-目标版本必须已经发布到 GitHub Release；留空或 `latest` 只表示最新发布的 Agent，不表示仓库最新源码。**Cloudflare 自动部署只更新面板/Worker，不会自动发布 Agent 二进制**。这项 UI / 命令功能不需要新增 Supabase SQL 迁移。
+目标版本必须已经发布到 GitHub Release；留空或 `latest` 只表示最新发布的 Agent，不表示仓库最新源码。**Cloudflare 自动部署只更新面板/Worker，不会自动发布 Agent 二进制**。更新 Agent 源码或 Go 安全补丁后，需要在 GitHub Actions 手动运行「Agent Release」，填写一个尚未发布的新版本号，再让节点升级到该版本；不要覆盖旧 Release。这项 UI / 命令功能不需要新增 Supabase SQL 迁移。
 
 ### GitHub 下载加速
 
