@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Badge, Box, Button, Checkbox, Dialog, Flex, Separator, Text } from '@radix-ui/themes';
-import { ArrowUpCircle, Info, RotateCw } from 'lucide-react';
+import { ArrowUpCircle, Info, RotateCw, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import { useApi } from '../../contexts/AuthContext';
 import {
@@ -40,6 +40,8 @@ export interface AgentUpgradeDialogProps {
   onResolvedTarget?: (version: string | null) => void;
   /** 升级波次推进结束后回调（父组件据此刷新节点列表）。 */
   onFinished?: () => void;
+  /** Opens a local bootstrap command; never creates, rotates or cancels credentials/tasks. */
+  onManualUpgrade?: (node: UpgradeTargetNode, targetVersion: string | null) => void;
 }
 
 function UpgradeNodeRow({
@@ -47,21 +49,24 @@ function UpgradeNodeRow({
   targetVersion,
   command,
   onRetry,
+  onManualUpgrade,
   busy,
 }: {
   node: UpgradeTargetNode;
   targetVersion: string | null;
   command?: AgentUpgradeCommand;
   onRetry: (uuid: string) => void;
+  onManualUpgrade?: AgentUpgradeDialogProps['onManualUpgrade'];
   busy: boolean;
 }) {
   const current = normalizeAgentVersion(node.version) || '未知版本';
-  const target = normalizeAgentVersion(targetVersion) || '最新版本';
-  const downgrade = isAgentDowngrade(node.version, targetVersion);
+  const actualTarget = command?.target_version ?? targetVersion;
+  const target = normalizeAgentVersion(actualTarget) || '最新版本';
+  const downgrade = isAgentDowngrade(node.version, actualTarget);
   const display = command ? upgradeStatusDisplay(command.status) : upgradeStatusDisplay('idle');
 
   return (
-    <Flex align="center" justify="between" gap="3" className="agent-upgrade-row">
+    <Flex align="center" justify="between" gap="3" wrap="wrap" className="agent-upgrade-row">
       <Flex direction="column" style={{ minWidth: 0 }}>
         <Flex align="center" gap="2">
           <Text size="2" weight="medium" truncate>{node.name || node.uuid}</Text>
@@ -83,6 +88,11 @@ function UpgradeNodeRow({
           failureReason={command?.failure_reason}
           fromVersion={command?.from_version ?? node.version}
         />
+        {onManualUpgrade && (
+          <Button size="1" variant="soft" onClick={() => onManualUpgrade(node, actualTarget)}>
+            <Terminal size={13} /> 手动升级
+          </Button>
+        )}
         {display.retryable && (
           <Button size="1" variant="soft" disabled={busy} onClick={() => onRetry(node.uuid)}>
             <RotateCw size={13} /> 重试
@@ -100,6 +110,7 @@ export default function AgentUpgradeDialog({
   targetVersion,
   onResolvedTarget,
   onFinished,
+  onManualUpgrade,
 }: AgentUpgradeDialogProps) {
   const apiFetch = useApi();
 
@@ -187,6 +198,11 @@ export default function AgentUpgradeDialog({
     if (!next) cancelPolling();
     onOpenChange(next);
   }, [cancelPolling, onOpenChange]);
+
+  const handleManualUpgrade = useCallback((node: UpgradeTargetNode, version: string | null) => {
+    handleOpenChange(false);
+    onManualUpgrade?.(node, version);
+  }, [handleOpenChange, onManualUpgrade]);
 
   const startUpgrade = useCallback(async () => {
     const target = resolvedTarget;
@@ -325,6 +341,7 @@ export default function AgentUpgradeDialog({
                         targetVersion={resolvedTarget}
                         command={commands[node.uuid]}
                         onRetry={retryNode}
+                        onManualUpgrade={onManualUpgrade ? handleManualUpgrade : undefined}
                         busy={running}
                       />
                     ))}
@@ -342,7 +359,10 @@ export default function AgentUpgradeDialog({
                 {partition.skipped.map((node) => (
                   <Flex key={node.uuid} align="center" justify="between" gap="3">
                     <Text size="2" truncate>{node.name || node.uuid}</Text>
-                    <Text size="1" color="gray">{normalizeAgentVersion(node.version)}</Text>
+                    <Flex align="center" gap="2">
+                      <Text size="1" color="gray">{normalizeAgentVersion(node.version)}</Text>
+                      {onManualUpgrade && <Button size="1" variant="soft" onClick={() => handleManualUpgrade(node, commands[node.uuid]?.target_version ?? resolvedTarget)}><Terminal size={13} /> 手动升级</Button>}
+                    </Flex>
                   </Flex>
                 ))}
               </Flex>
@@ -350,9 +370,10 @@ export default function AgentUpgradeDialog({
           )}
         </div>
 
-        <Flex justify="end" gap="2" mt="3">
+        <Text as="p" size="1" color="gray" mt="2">旧 Agent 不支持远程升级时可使用手动升级命令。关闭仅停止后续批次和本窗口轮询，不会撤销已下发任务。</Text>
+        <Flex justify="end" gap="2" mt="3" wrap="wrap">
           {running
-            ? <Button color="red" variant="soft" onClick={() => handleOpenChange(false)}>停止并关闭</Button>
+            ? <Button color="red" variant="soft" onClick={() => handleOpenChange(false)}>停止后续批次并关闭</Button>
             : <Button variant="soft" onClick={() => handleOpenChange(false)}>关闭</Button>}
           <Button onClick={startUpgrade} disabled={!canStart}>
             <ArrowUpCircle size={14} />

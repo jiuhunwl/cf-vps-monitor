@@ -21,7 +21,7 @@ import {
 } from '@radix-ui/themes';
 import {
   Plus, Pencil, Trash2, Copy, Search,
-  Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound, ArrowUpCircle
+  Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound, ArrowUpCircle, Terminal
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
@@ -32,6 +32,8 @@ import PriceTags from '../../components/PriceTags';
 import { BillingCycleSelect, CurrencySymbols, ExpiryDateInput } from '../../components/admin/BillingControls';
 import { TrafficLimitEditor } from '../../components/admin/TrafficLimitEditor';
 import AgentUpgradeDialog from '../../components/admin/AgentUpgradeDialog';
+import AgentManualUpgradeDialog, { AgentManualUpgradeTarget } from '../../components/admin/AgentManualUpgradeDialog';
+import GitHubProxyInput from '../../components/admin/GitHubProxyInput';
 import { formatBytes } from '../../utils/format';
 import { isValidDisplayPrice, toDateInputValue } from '../../utils/billing';
 import {
@@ -49,6 +51,7 @@ import {
   normalizeServerUrl,
 } from '../../utils/agentInstallCommand';
 import {
+  UpgradeTargetNode,
   countUpgradableTargets,
   fetchUpgradeRelease,
   isAgentUpToDate,
@@ -164,6 +167,7 @@ interface SortableRowProps {
   onCmd: (client: CommandClient) => void;
   onRotateToken: (client: AdminClient) => void;
   onUpgrade: (client: AdminClient) => void;
+  onManualUpgrade: (client: AdminClient) => void;
   agentLatestVersion: string | null;
   dragDisabled?: boolean;
 }
@@ -274,7 +278,7 @@ function formatDetailTime(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN') : '-';
 }
 
-function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit, onDelete, onCmd, onRotateToken, onUpgrade, agentLatestVersion, dragDisabled }: SortableRowProps) {
+function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit, onDelete, onCmd, onRotateToken, onUpgrade, onManualUpgrade, agentLatestVersion, dragDisabled }: SortableRowProps) {
   const isOnline = liveData.online.includes(node.uuid);
   const agentVersion = normalizeAgentVersion(node.version) || '-';
   const latestVersion = normalizeAgentVersion(agentLatestVersion);
@@ -346,6 +350,7 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
           <Flex className="admin-row-actions">
             <RowActionButton label="编辑" onClick={() => onEdit(node)}><Pencil size={13} /></RowActionButton>
             <RowActionButton label="安装命令" onClick={() => onCmd(node)}><Download size={13} /></RowActionButton>
+            <RowActionButton label="手动升级" onClick={() => onManualUpgrade(node)}><Terminal size={13} /></RowActionButton>
             <RowActionButton label={upgradeLabel} disabled={upgradeUpToDate} onClick={() => onUpgrade(node)}><ArrowUpCircle size={13} /></RowActionButton>
             <RowActionButton label="重置 Token" onClick={() => onRotateToken(node)}><KeyRound size={13} /></RowActionButton>
             <RowActionButton label="删除" color="red" onClick={() => onDelete(node)}><Trash2 size={13} /></RowActionButton>
@@ -500,7 +505,7 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
                 </Select.Content>
               </Select.Root>
             </label>
-            <FieldInput label="GitHub 代理" value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} placeholder="为空则不使用代理" />
+            <GitHubProxyInput value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} />
             <FieldInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
             <FieldInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF VPS Monitor' : '自动选择系统目录或用户目录'} />
             <FieldInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFVpsMonitorAgent' : 'cf-vps-monitor-agent'} />
@@ -515,13 +520,13 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
           </div>
         </Flex>
 
-        <Box className="admin-command-code">{loadingToken ? '正在获取 Token...' : cmd}</Box>
+        <Box className="admin-command-code">{loadingToken ? '正在获取 Token...' : cmd || '请先修正 GitHub 代理地址。'}</Box>
         <Flex justify="end" gap="2" mt="3">
-          <Button color="red" variant="soft" onClick={() => copyToClipboard(uninstallAllCmd, '彻底卸载命令已复制')}>
+          <Button color="red" variant="soft" onClick={() => { if (uninstallAllCmd) void copyToClipboard(uninstallAllCmd, '彻底卸载命令已复制'); }} disabled={!uninstallAllCmd}>
             <Trash2 size={14} /> 彻底卸载
           </Button>
           <Button variant="soft" onClick={() => onOpenChange(false)}>关闭</Button>
-          <Button onClick={() => copyToClipboard(cmd, '命令已复制')} disabled={loadingToken || !agentToken}><Copy size={14} /> 复制命令</Button>
+          <Button onClick={() => { if (cmd && agentToken && !loadingToken) void copyToClipboard(cmd, '命令已复制'); }} disabled={loadingToken || !agentToken || !cmd}><Copy size={14} /> 复制命令</Button>
         </Flex>
       </Dialog.Content>
     </Dialog.Root>
@@ -921,6 +926,15 @@ export default function AdminDashboard() {
   const [agentLatestVersion, setAgentLatestVersion] = useState<string | null>(null);
   const [upgradeNodes, setUpgradeNodes] = useState<AdminClient[]>([]);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
+  const [manualTarget, setManualTarget] = useState<AgentManualUpgradeTarget | null>(null);
+  const openManualUpgrade = useCallback((node: UpgradeTargetNode, targetVersion: string | null = agentLatestVersion) => {
+    setManualTarget({
+      name: node.name || node.uuid,
+      version: node.version,
+      os: clients.find((client) => client.uuid === node.uuid)?.os,
+      targetVersion,
+    });
+  }, [agentLatestVersion, clients]);
 
   const liveData: LiveDataMap = useMemo(() => normalizeLiveData(rawLiveData), [rawLiveData]);
   const sensors = useSensors(
@@ -1287,6 +1301,7 @@ export default function AdminDashboard() {
                     onCmd={(c) => { setCmdClient(c); setCmdOpen(true); }}
                     onRotateToken={(c) => { setRotateTokenClient(c); setRotateTokenOpen(true); }}
                     onUpgrade={(c) => openUpgradeForNodes([c.uuid])}
+                    onManualUpgrade={openManualUpgrade}
                     agentLatestVersion={agentLatestVersion}
                   />
                 ))}
@@ -1348,11 +1363,13 @@ export default function AdminDashboard() {
       }} />
       {detailClient && <DetailDialog client={detailClient} open={detailOpen} onOpenChange={setDetailOpen} />}
       {cmdClient && <GenerateCommandDialog client={cmdClient} open={cmdOpen} onOpenChange={setCmdOpen} />}
+      {manualTarget && <AgentManualUpgradeDialog target={manualTarget} onClose={() => setManualTarget(null)} />}
       <AgentUpgradeDialog
         open={upgradeOpen}
         onOpenChange={setUpgradeOpen}
         nodes={upgradeNodes}
         targetVersion={agentLatestVersion}
+        onManualUpgrade={openManualUpgrade}
         onResolvedTarget={(version) => { if (version) setAgentLatestVersion(version); }}
         onFinished={() => { void loadClients(true); }}
       />

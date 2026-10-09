@@ -106,8 +106,24 @@ export function normalizeProxyUrl(value: string, allowPath = true) {
   return '';
 }
 
+export const GITHUB_PROXY_PRESETS = [
+  'https://gh-proxy.org',
+  'https://v4.gh-proxy.org',
+  'https://v6.gh-proxy.org',
+  'https://cdn.gh-proxy.org',
+  'https://axisnow.gh-proxy.org',
+] as const;
+
+/** A content mirror is not an HTTP CONNECT proxy: downloads must stay HTTPS. */
+export function normalizeGitHubProxyUrl(value: string) {
+  const raw = value.trim();
+  if (!raw || /[\u0000-\u001f\u007f]/.test(value) || /\s/.test(raw)) return '';
+  const withScheme = raw.includes('://') ? raw : `https://${raw}`;
+  const proxy = normalizeProxyUrl(withScheme);
+  return proxy.startsWith('https://') ? proxy : '';
+}
 export function proxiedUrl(url: string, ghproxy = '') {
-  const proxy = normalizeProxyUrl(ghproxy);
+  const proxy = normalizeGitHubProxyUrl(ghproxy);
   if (!proxy) return url;
   return `${proxy}/${url}`;
 }
@@ -194,7 +210,8 @@ export function buildAgentInstallCommand({
   instanceId?: string;
   nodeName?: string;
 }) {
-  const ghproxy = normalizeProxyUrl(options.ghproxy);
+  const ghproxy = normalizeGitHubProxyUrl(options.ghproxy);
+  if (/[\u0000-\u001f\u007f]/.test(options.ghproxy) || (options.ghproxy.trim() && !ghproxy)) return '';
   const downloadProxy = normalizeProxyUrl(options.downloadProxy, false);
   const { binaryUrl, checksumUrl } = customAgentDownloadUrls(options.binaryUrl, options.checksumUrl);
   const releaseTag = normalizeReleaseTag(options.releaseTag);
@@ -267,7 +284,8 @@ export function buildAgentUninstallAllCommand({
   ghproxy?: string;
   scriptRef?: string;
 }) {
-  const proxy = normalizeProxyUrl(ghproxy);
+  const proxy = normalizeGitHubProxyUrl(ghproxy);
+  if (/[\u0000-\u001f\u007f]/.test(ghproxy) || (ghproxy.trim() && !proxy)) return '';
   const scriptUrl = (file: 'install.sh' | 'install-windows.ps1') =>
     cfMonitorAgentScriptUrl(file, proxy, '', scriptRef);
   switch (platform) {
@@ -282,4 +300,100 @@ export function buildAgentUninstallAllCommand({
         ['--uninstall-all', '--yes', ...(proxy ? ['--install-ghproxy', proxy] : [])],
       );
   }
+}
+
+export type AgentManualUpgradeOptions = {
+  ghproxy: string;
+  downloadProxy: string;
+  installMode: 'auto' | 'system' | 'user';
+  instanceId: string;
+  dir: string;
+  serviceName: string;
+  releaseTag: string;
+};
+
+export const defaultAgentManualUpgradeOptions: AgentManualUpgradeOptions = {
+  ghproxy: '', downloadProxy: '', installMode: 'auto', instanceId: '',
+  dir: '', serviceName: '', releaseTag: '',
+};
+
+/** Bootstrap with the current installer, never by asking the old Agent to upgrade itself. */
+export function buildAgentManualUpgradeCommand({ platform, options, scriptRef = '' }: {
+  platform: AgentInstallPlatform;
+  options: AgentManualUpgradeOptions;
+  scriptRef?: string;
+}): string {
+  const values = [options.ghproxy, options.downloadProxy, options.instanceId, options.dir, options.serviceName, options.releaseTag];
+  if (values.some(value => /[\u0000-\u001f\u007f]/.test(value))) return '';
+  const ghproxy = normalizeGitHubProxyUrl(options.ghproxy);
+  const downloadProxy = normalizeProxyUrl(options.downloadProxy, false);
+  if ((options.ghproxy.trim() && !ghproxy) || (options.downloadProxy.trim() && !downloadProxy)) return '';
+  const rawTag = options.releaseTag.trim();
+  const releaseTag = rawTag.toLowerCase() === 'latest' ? '' : normalizeReleaseTag(rawTag);
+  if (rawTag && rawTag.toLowerCase() !== 'latest' && !releaseTag) return '';
+  const instanceId = options.instanceId.trim().toLowerCase();
+  if (instanceId && !/^[a-z0-9][a-z0-9_.-]{0,47}$/.test(instanceId)) return '';
+  const dir = options.dir.trim();
+  const serviceName = options.serviceName.trim();
+  if (!['auto', 'system', 'user'].includes(options.installMode)) return '';
+  if (serviceName && (serviceName.startsWith('-') || ['.', '..'].includes(serviceName)
+    || (platform === 'unix' ? !/^[A-Za-z0-9_.@-]+$/.test(serviceName) : /[\\/*?\[\]]/.test(serviceName)))) return '';
+
+  // The bootstrap script must be new enough to understand --upgrade/-Upgrade.
+  // ReleaseTag selects the binary, not an old installer bundled with that release.
+  const scriptUrl = cfMonitorAgentScriptUrl(platform === 'windows' ? 'install-windows.ps1' : 'install.sh', ghproxy, '', scriptRef);
+  const curlArgs = ['--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+    '--proto-redir', '=https', '--connect-timeout', '15', '--max-time', '120'];
+  if (downloadProxy) curlArgs.push('--proxy', downloadProxy);
+  curlArgs.push(scriptUrl);
+
+  if (platform === 'unix') {
+    const args = ['--upgrade'];
+    if (releaseTag) args.push('--release-tag', releaseTag);
+    if (instanceId) args.push('--instance-id', instanceId);
+    if (options.installMode !== 'auto') args.push('--install-mode', options.installMode);
+    if (ghproxy) args.push('--install-ghproxy', ghproxy);
+    if (downloadProxy) args.push('--proxy', downloadProxy);
+    if (dir) args.push('--install-dir', dir);
+    if (serviceName) args.push('--service-name', serviceName);
+    const script = [
+      'set -eu',
+      'command -v curl >/dev/null 2>&1 || { printf "%s\\n" "curl is required for HTTPS-only bootstrap" >&2; exit 1; }',
+      'installer=$(mktemp "${TMPDIR:-/tmp}/cf-vps-upgrade.XXXXXXXX")',
+      'trap \'rm -f -- "$installer"\' 0',
+      'trap \'exit 1\' HUP INT TERM',
+      `curl ${curlArgs.map(shellQuote).join(' ')} --output "$installer"`,
+      `sh "$installer" ${args.map(shellQuote).join(' ')}`,
+    ].join('\n');
+    return `sh -c ${shellQuote(script)}`;
+  }
+
+  if (platform === 'windows') {
+    const args = ['-Upgrade'];
+    const add = (flag: string, value: string) => { if (value) args.push(flag, psQuote(value)); };
+    add('-ReleaseTag', releaseTag);
+    add('-InstanceId', instanceId);
+    add('-InstallGhproxy', ghproxy);
+    add('-Proxy', downloadProxy);
+    add('-InstallDir', dir);
+    add('-ServiceName', serviceName);
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "$curl = (Get-Command curl.exe -CommandType Application -ErrorAction Stop).Source",
+      "$work = Join-Path ([IO.Path]::GetTempPath()) ('cf-vps-upgrade-' + [Guid]::NewGuid().ToString('N'))",
+      '[void][IO.Directory]::CreateDirectory($work)',
+      "$installer = Join-Path $work 'install-windows.ps1'",
+      'try {',
+      `  & $curl ${curlArgs.map(psQuote).join(' ')} --output $installer`,
+      "  if ($LASTEXITCODE -ne 0) { throw 'HTTPS installer download failed; nothing was executed.' }",
+      `  & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $installer ${args.join(' ')}`,
+      "  if ($LASTEXITCODE -ne 0) { throw 'Agent installer reported failure.' }",
+      '} finally {',
+      "  if (Test-Path -LiteralPath $installer -PathType Leaf) { Remove-Item -LiteralPath $installer -Force }",
+      '  try { [IO.Directory]::Delete($work) } catch { Write-Warning "Temporary directory retained: $work" }',
+      '}',
+    ].join('\n');
+    return powershellCommand(script);
+  }
+  return '';
 }
