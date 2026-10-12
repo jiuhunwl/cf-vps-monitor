@@ -93,4 +93,5 @@ jobs:
       - name: Check migration drift
         run: |
           npm run build:migrations
+          node scripts/gen-diagnose-sql.mjs
           git diff --exit-code -- supabase/ worker/src/generated/
