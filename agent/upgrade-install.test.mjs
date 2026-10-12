@@ -323,6 +323,40 @@ printf 'EXPLICIT NAME=%s MODE=%s DAY=%s\\n' "$NODE_NAME" "$MODE" "$TRAFFIC_RESET
     );
     assert.match(out, /EXPLICIT NAME=explicit MODE=websocket DAY=3/, `${name} 的显式参数必须优先于已存配置`);
   });
+
+  test(`U-S14 ${name} 启动升级守护时 systemctl 收到的是单元名而非绝对路径`, t => {
+    // 生产实测 Bug：systemctl restart/is-active 拿到绝对路径会被 systemd 当作
+    // 「路径单元」解析（转义成 etc-systemd-system-...upgrade.path.mount → Unit not found），
+    // 守护静默启动失败、面板升级不可用。run() 直接 "$@"，故用同名 shell 函数即可拦截。
+    const body = `
+SERVICE_NAME=cf-vps-monitor-agent-demo
+SERVICE_MODE=systemd
+UNIT_FILE="$ROOT/systemd/cf-vps-monitor-agent-demo.service"
+INSTALL_DIR="$ROOT/install"
+STATE_DIR="$INSTALL_DIR/state"
+agent_upgrade_service_paths
+UPGRADE_SUPERVISOR_ENABLED=1
+systemctl() { printf '%s\\n' "$*" >> "$ROOT/systemctl-calls"; }
+if agent_start_upgrade_supervisor; then printf '%s\\n' 'RC=0'; else printf '%s\\n' 'RC=nonzero'; fi
+printf '%s\\n' '---CALLS---'
+cat "$ROOT/systemctl-calls" 2>/dev/null || :
+`;
+    const out = stdoutOf(runShell(t, name, body).result);
+    assert.match(out, /RC=0/, `${name} 守护启动失败（注入的 systemctl 全部成功时应当返回 0）`);
+    const calls = (out.split('---CALLS---')[1] || '').split('\n').map(s => s.trim()).filter(Boolean);
+    assert.ok(calls.length > 0, `${name} 未调用 systemctl，用例无效`);
+    assert.ok(
+      calls.every(call => !call.includes('/')),
+      `${name} 把绝对路径交给了 systemctl（systemd 会解析成路径单元而失败）：\n${calls.join('\n')}`,
+    );
+    assert.ok(
+      calls.every(call => call.includes('cf-vps-monitor-agent-demo-upgrade.path')),
+      `${name} systemctl 收到的单元名不正确：\n${calls.join('\n')}`,
+    );
+    assert.ok(calls.some(call => /^enable\b/.test(call)), `${name} 未执行 systemctl enable`);
+    assert.ok(calls.some(call => /^restart\b/.test(call)), `${name} 未执行 systemctl restart`);
+    assert.ok(calls.some(call => /^is-active\b/.test(call)), `${name} 未执行 systemctl is-active`);
+  });
 }
 
 // 结构性回归锁（跨脚本一致，不依赖 shell 执行环境）。

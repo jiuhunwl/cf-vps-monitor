@@ -1007,7 +1007,7 @@ agent_start_upgrade_supervisor() {
   [ "${UPGRADE_SUPERVISOR_ENABLED:-0}" = 1 ] || return 0
   case "$SERVICE_MODE" in
     systemd)
-      if run systemctl enable "$UPGRADE_PATH_FILE" && run systemctl restart "$UPGRADE_PATH_FILE" && run systemctl is-active --quiet "$UPGRADE_PATH_FILE"; then return 0; fi ;;
+      if run systemctl enable "$(basename "$UPGRADE_PATH_FILE")" && run systemctl restart "$(basename "$UPGRADE_PATH_FILE")" && run systemctl is-active --quiet "$(basename "$UPGRADE_PATH_FILE")"; then return 0; fi ;;
     openrc)
       if run rc-update add "$UPGRADE_SERVICE_NAME" default && run rc-service "$UPGRADE_SERVICE_NAME" restart; then return 0; fi ;;
   esac
