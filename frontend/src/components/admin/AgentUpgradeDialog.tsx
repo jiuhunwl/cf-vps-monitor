@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Badge, Box, Button, Checkbox, Dialog, Flex, Separator, Text } from '@radix-ui/themes';
-import { ArrowUpCircle, Info, RotateCw, Terminal } from 'lucide-react';
+import { ArrowUpCircle, ClipboardCopy, Info, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useApi } from '../../contexts/AuthContext';
 import {
@@ -90,7 +90,7 @@ function UpgradeNodeRow({
         />
         {onManualUpgrade && (
           <Button size="1" variant="soft" onClick={() => onManualUpgrade(node, actualTarget)}>
-            <Terminal size={13} /> 手动升级
+            <ClipboardCopy size={13} /> 手动升级
           </Button>
         )}
         {display.retryable && (
@@ -361,7 +361,7 @@ export default function AgentUpgradeDialog({
                     <Text size="2" truncate>{node.name || node.uuid}</Text>
                     <Flex align="center" gap="2">
                       <Text size="1" color="gray">{normalizeAgentVersion(node.version)}</Text>
-                      {onManualUpgrade && <Button size="1" variant="soft" onClick={() => handleManualUpgrade(node, commands[node.uuid]?.target_version ?? resolvedTarget)}><Terminal size={13} /> 手动升级</Button>}
+                      {onManualUpgrade && <Button size="1" variant="soft" onClick={() => handleManualUpgrade(node, commands[node.uuid]?.target_version ?? resolvedTarget)}><ClipboardCopy size={13} /> 手动升级</Button>}
                     </Flex>
                   </Flex>
                 ))}

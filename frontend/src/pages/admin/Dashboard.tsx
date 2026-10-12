@@ -21,7 +21,7 @@ import {
 } from '@radix-ui/themes';
 import {
   Plus, Pencil, Trash2, Copy, Search,
-  Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound, ArrowUpCircle, Terminal
+  Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound, ArrowUpCircle, ClipboardCopy
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
@@ -350,7 +350,7 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
           <Flex className="admin-row-actions">
             <RowActionButton label="编辑" onClick={() => onEdit(node)}><Pencil size={13} /></RowActionButton>
             <RowActionButton label="安装命令" onClick={() => onCmd(node)}><Download size={13} /></RowActionButton>
-            <RowActionButton label="手动升级" onClick={() => onManualUpgrade(node)}><Terminal size={13} /></RowActionButton>
+            <RowActionButton label="手动升级" onClick={() => onManualUpgrade(node)}><ClipboardCopy size={13} /></RowActionButton>
             <RowActionButton label={upgradeLabel} disabled={upgradeUpToDate} onClick={() => onUpgrade(node)}><ArrowUpCircle size={13} /></RowActionButton>
             <RowActionButton label="重置 Token" onClick={() => onRotateToken(node)}><KeyRound size={13} /></RowActionButton>
             <RowActionButton label="删除" color="red" onClick={() => onDelete(node)}><Trash2 size={13} /></RowActionButton>

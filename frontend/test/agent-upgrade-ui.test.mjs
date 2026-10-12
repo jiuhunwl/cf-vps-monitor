@@ -7,7 +7,7 @@ const require = createRequire(new URL('../package.json', import.meta.url));
 const React = require('react');
 const themes = require('@radix-ui/themes');
 const { renderToStaticMarkup } = require('react-dom/server');
-const { Terminal, RotateCw } = require('lucide-react');
+const { ClipboardCopy, RotateCw } = require('lucide-react');
 const presets = ['https://gh-proxy.org', 'https://v4.gh-proxy.org', 'https://v6.gh-proxy.org', 'https://cdn.gh-proxy.org', 'https://axisnow.gh-proxy.org'];
 const proxyFile = 'src/components/admin/GitHubProxyInput.tsx';
 const manualFile = 'src/components/admin/AgentManualUpgradeDialog.tsx';
@@ -135,7 +135,7 @@ test('Dashboard manual entry is available even when remote upgrade is already la
     && element.openingElement.tagName.getText(ast) === 'RowActionButton'
     && element.openingElement.attributes.properties.some(attribute => ts.isJsxAttribute(attribute)
       && attribute.name.getText(ast) === 'label' && attribute.initializer?.getText(ast) === '"手动升级"'), {
-    RowActionButton: Shell, Terminal, node, upgradeUpToDate: true, onManualUpgrade: value => calls.push(value),
+    RowActionButton: Shell, ClipboardCopy, node, upgradeUpToDate: true, onManualUpgrade: value => calls.push(value),
   });
   assert.notEqual(action.props.disabled, true);
   action.props.onClick();
@@ -158,7 +158,7 @@ test('Dashboard only stores non-secret manual target details and never reuses th
 test('remote fallback uses the actual queued command version, not a newer release suggestion', () => {
   const upgrade = productionModule('src/utils/agentUpgrade.ts');
   const Row = productionDeclaration(remoteFile, 'UpgradeNodeRow', {
-    ...themes, ...upgrade, Terminal, RotateCw, AgentUpgradeStatusBadge: Shell,
+    ...themes, ...upgrade, ClipboardCopy, RotateCw, AgentUpgradeStatusBadge: Shell,
   });
   const node = { uuid: 'legacy', name: 'legacy', version: 'v1.0.0' };
   const calls = [];
