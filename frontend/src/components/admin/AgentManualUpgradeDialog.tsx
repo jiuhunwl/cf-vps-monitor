@@ -93,7 +93,7 @@ export default function AgentManualUpgradeDialog({ target, onClose }: {
           </Box>
           <div className="install-options-grid">
             <ManualField label="目标 Release Tag" value={options.releaseTag} onChange={(value) => setOption('releaseTag', value)}
-              placeholder="例如 v2.0.4；留空或 latest 使用最新发布版"
+              placeholder="例如 v2.0.5；留空或 latest 使用最新发布版"
               helper="安装器使用当前仓库代码，目标二进制必须已发布到 GitHub Release；更新 Cloudflare 不会发布 Agent。" />
             <GitHubProxyInput value={options.ghproxy} onChange={(value) => setOption('ghproxy', value)} />
             <ManualField label="下载代理" value={options.downloadProxy} onChange={(value) => setOption('downloadProxy', value)}
@@ -112,8 +112,8 @@ export default function AgentManualUpgradeDialog({ target, onClose }: {
               </label>
             )}
             <ManualField label="原实例 ID" value={options.instanceId} onChange={(value) => setOption('instanceId', value)}
-              placeholder="留空使用旧版默认实例"
-              helper="多实例请填写原安装命令中的 -i / --instance-id / -InstanceId，不会自动套用节点 UUID。" />
+              placeholder="留空自动识别已装实例"
+              helper="留空时安装器自动认领唯一已装实例；有多套安装或自定义过目录/服务名时，请填原安装命令中的 -i / --instance-id / -InstanceId。" />
             <ManualField label="原安装目录" value={options.dir} onChange={(value) => setOption('dir', value)}
               placeholder={platform === 'windows' ? '默认目录留空；自定义时填原 Windows 路径' : '默认目录留空；自定义时填原绝对路径'} />
             <ManualField label="原服务名称" value={options.serviceName} onChange={(value) => setOption('serviceName', value)}

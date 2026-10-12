@@ -317,7 +317,19 @@ export const defaultAgentManualUpgradeOptions: AgentManualUpgradeOptions = {
   dir: '', serviceName: '', releaseTag: '',
 };
 
-/** Bootstrap with the current installer, never by asking the old Agent to upgrade itself. */
+/**
+ * 手动升级命令：与安装/卸载同形的单行管道，唯一区别是 `--upgrade`。
+ * 不带任何连接凭据（token / server / panel UUID）——安装器会从原安装的
+ * ENV_FILE 里读回连接配置。目标实例不再要求手填：安装器在未给
+ * `--instance-id` 时会自动认领已装实例（见 install.sh 的实例发现）。
+ *
+ * 与安装命令同为「下载即执行」的管道形态，因此只保留两条护栏：
+ * HTTPS-only（--proto / --proto-redir 都锁 =https）与 -f（HTTP 错误即失败，
+ * 不给 sh 喂半截脚本）。
+ *
+ * The bootstrap script must be new enough to understand --upgrade/-Upgrade.
+ * ReleaseTag selects the binary, not an old installer bundled with that release.
+ */
 export function buildAgentManualUpgradeCommand({ platform, options, scriptRef = '' }: {
   platform: AgentInstallPlatform;
   options: AgentManualUpgradeOptions;
@@ -339,13 +351,7 @@ export function buildAgentManualUpgradeCommand({ platform, options, scriptRef = 
   if (serviceName && (serviceName.startsWith('-') || ['.', '..'].includes(serviceName)
     || (platform === 'unix' ? !/^[A-Za-z0-9_.@-]+$/.test(serviceName) : /[\\/*?\[\]]/.test(serviceName)))) return '';
 
-  // The bootstrap script must be new enough to understand --upgrade/-Upgrade.
-  // ReleaseTag selects the binary, not an old installer bundled with that release.
   const scriptUrl = cfMonitorAgentScriptUrl(platform === 'windows' ? 'install-windows.ps1' : 'install.sh', ghproxy, '', scriptRef);
-  const curlArgs = ['--fail', '--silent', '--show-error', '--location', '--proto', '=https',
-    '--proto-redir', '=https', '--connect-timeout', '15', '--max-time', '120'];
-  if (downloadProxy) curlArgs.push('--proxy', downloadProxy);
-  curlArgs.push(scriptUrl);
 
   if (platform === 'unix') {
     const args = ['--upgrade'];
@@ -356,16 +362,11 @@ export function buildAgentManualUpgradeCommand({ platform, options, scriptRef = 
     if (downloadProxy) args.push('--proxy', downloadProxy);
     if (dir) args.push('--install-dir', dir);
     if (serviceName) args.push('--service-name', serviceName);
-    const script = [
-      'set -eu',
-      'command -v curl >/dev/null 2>&1 || { printf "%s\\n" "curl is required for HTTPS-only bootstrap" >&2; exit 1; }',
-      'installer=$(mktemp "${TMPDIR:-/tmp}/cf-vps-upgrade.XXXXXXXX")',
-      'trap \'rm -f -- "$installer"\' 0',
-      'trap \'exit 1\' HUP INT TERM',
-      `curl ${curlArgs.map(shellQuote).join(' ')} --output "$installer"`,
-      `sh "$installer" ${args.map(shellQuote).join(' ')}`,
-    ].join('\n');
-    return `sh -c ${shellQuote(script)}`;
+    const curl = ['curl', '-fsSL', '--proto', '=https', '--proto-redir', '=https',
+      '--connect-timeout', '15', '--max-time', '120'];
+    if (downloadProxy) curl.push('--proxy', downloadProxy);
+    curl.push(scriptUrl);
+    return shPipe(curl.map(shellQuote).join(' '), args);
   }
 
   if (platform === 'windows') {
@@ -377,23 +378,9 @@ export function buildAgentManualUpgradeCommand({ platform, options, scriptRef = 
     add('-Proxy', downloadProxy);
     add('-InstallDir', dir);
     add('-ServiceName', serviceName);
-    const script = [
-      "$ErrorActionPreference = 'Stop'",
-      "$curl = (Get-Command curl.exe -CommandType Application -ErrorAction Stop).Source",
-      "$work = Join-Path ([IO.Path]::GetTempPath()) ('cf-vps-upgrade-' + [Guid]::NewGuid().ToString('N'))",
-      '[void][IO.Directory]::CreateDirectory($work)',
-      "$installer = Join-Path $work 'install-windows.ps1'",
-      'try {',
-      `  & $curl ${curlArgs.map(psQuote).join(' ')} --output $installer`,
-      "  if ($LASTEXITCODE -ne 0) { throw 'HTTPS installer download failed; nothing was executed.' }",
-      `  & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $installer ${args.join(' ')}`,
-      "  if ($LASTEXITCODE -ne 0) { throw 'Agent installer reported failure.' }",
-      '} finally {',
-      "  if (Test-Path -LiteralPath $installer -PathType Leaf) { Remove-Item -LiteralPath $installer -Force }",
-      '  try { [IO.Directory]::Delete($work) } catch { Write-Warning "Temporary directory retained: $work" }',
-      '}',
-    ].join('\n');
-    return powershellCommand(script);
+    return powershellCommand(
+      `iwr ${psQuote(scriptUrl)} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.join(' ')}`,
+    );
   }
   return '';
 }
