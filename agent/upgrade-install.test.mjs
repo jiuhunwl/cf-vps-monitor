@@ -357,7 +357,172 @@ cat "$ROOT/systemctl-calls" 2>/dev/null || :
     assert.ok(calls.some(call => /^restart\b/.test(call)), `${name} 未执行 systemctl restart`);
     assert.ok(calls.some(call => /^is-active\b/.test(call)), `${name} 未执行 systemctl is-active`);
   });
+
+  // 发现逻辑的测试替身：fixture 位于临时目录，既无法创建 root 拥有的文件，也无法向
+  // /opt 写入。因此把「扫描根」指向 fixture，并把所有权判据替换为可在任意平台构造的
+  // 近似：常规文件、非符号链接、且无 group/other 写位（位掩码判据与 agent_root_path_safe
+  // 相同，仅省去 uid 与祖先遍历）。真实的 uid/祖先判据由 agent_root_path_safe 自身锁定。
+  const discoveryDouble = `agent_upgrade_discovery_root() { printf '%s\\n' "$ROOT/root"; }
+agent_root_path_safe() (
+  p="$1"
+  [ -e "$p" ] && [ ! -L "$p" ] || exit 1
+  set -- $(stat -c '%u %a' "$p" 2>/dev/null) || exit 1
+  [ "$#" = 2 ] || exit 1
+  case "$2" in ''|*[!0-7]*) exit 1 ;; esac
+  [ "$((0$2 & 0022))" = 0 ] || exit 1
+)`;
+
+  const instanceId = '984e1c40-a2c5-42c0-9600-4415bec4d9bf';
+  const applyDefaults = name === 'install.sh' ? 'apply_defaults' : 'apply_instance_defaults';
+
+  test(`U-S15 ${name} --upgrade 无 -i 时认领唯一的已装实例而非 default`, t => {
+    const body = `
+${discoveryDouble}
+id=${instanceId}
+d="$ROOT/root/$id"
+mkdir -p "$d"
+printf '%s\\n' 'cf-vps-monitor-agent:1' "$id" systemd "cf-vps-monitor-agent-$id" "$d" "/etc/cf-vps-monitor-agent-$id.env" "$d/state" > "$d/.cf-vps-monitor-owned"
+chmod 600 "$d/.cf-vps-monitor-owned"
+UPGRADE=1; INSTANCE_ID=""; INSTALL_DIR=""; SERVICE_NAME=""; SERVICE_MODE=systemd
+UNINSTALL=0; UNINSTALL_ALL=0
+agent_discover_upgrade_instance
+printf 'PICKED=%s\\n' "$INSTANCE_ID"
+${applyDefaults}
+printf 'DERIVED BASE_ID=%s INSTALL_DIR=%s\\n' "$BASE_ID" "$INSTALL_DIR"
+`;
+    const { result } = runShell(t, name, body);
+    const out = stdoutOf(result);
+    assert.match(out, /Reusing existing installation/, `${name} 未提示复用已装实例`);
+    assert.match(out, new RegExp(`PICKED=${instanceId}`), `${name} 未认领唯一实例`);
+    assert.match(
+      out,
+      new RegExp(`DERIVED BASE_ID=${instanceId} INSTALL_DIR=/opt/cf-vps-monitor/${instanceId}\\b`),
+      `${name} 升级目标不是 ${instanceId} 实例`,
+    );
+    assert.doesNotMatch(out, /INSTALL_DIR=\/opt\/cf-vps-monitor\/default/, `${name} 仍落到了 default 实例`);
+    assert.doesNotMatch(result.stderr, /requires an existing installation/, `${name} 不应再触发「需要既有安装」`);
+  });
+
+  test(`U-S16 ${name} --upgrade 多候选时拒绝猜测并列出全部`, t => {
+    const body = `
+${discoveryDouble}
+for id in aaaaaaaa-1111-1111-1111-111111111111 bbbbbbbb-2222-2222-2222-222222222222; do
+  d="$ROOT/root/$id"; mkdir -p "$d"
+  printf '%s\\n' 'cf-vps-monitor-agent:1' "$id" systemd "cf-vps-monitor-agent-$id" "$d" "/etc/cf-vps-monitor-agent-$id.env" "$d/state" > "$d/.cf-vps-monitor-owned"
+  chmod 600 "$d/.cf-vps-monitor-owned"
+done
+UPGRADE=1; INSTANCE_ID=""; INSTALL_DIR=""; SERVICE_NAME=""; SERVICE_MODE=systemd
+agent_discover_upgrade_instance
+printf 'SHOULD-NOT-REACH\\n'
+`;
+    const { result } = runShell(t, name, body);
+    assert.notEqual(result.status, 0, `${name} 多候选必须非零退出`);
+    assert.doesNotMatch(result.stdout, /SHOULD-NOT-REACH/, `${name} 多候选时不得继续`);
+    assert.match(result.stderr, /multiple existing installations/i, `${name} 未说明多候选`);
+    assert.match(result.stderr, /aaaaaaaa-1111-1111-1111-111111111111/, `${name} 未列出候选 A`);
+    assert.match(result.stderr, /bbbbbbbb-2222-2222-2222-222222222222/, `${name} 未列出候选 B`);
+  });
+
+  test(`U-S17 ${name} --upgrade 拒绝伪造或非法的实例 marker`, t => {
+    const body = `
+${discoveryDouble}
+good=${instanceId}
+probe() {
+  UPGRADE=1; INSTANCE_ID=""; INSTALL_DIR=""; SERVICE_NAME=""; SERVICE_MODE=systemd
+  agent_discover_upgrade_instance
+  if [ -n "$INSTANCE_ID" ]; then printf 'FORGED %s ADOPTED\\n' "$1"; else printf 'FORGED %s REJECTED\\n' "$1"; fi
 }
+reset_root() { rm -rf "$ROOT/root"; mkdir -p "$ROOT/root"; }
+# (1) 第 5 行指向别处：防止把 marker 从别的目录拷贝过来
+reset_root; d="$ROOT/root/$good"; mkdir -p "$d"
+printf '%s\\n' 'cf-vps-monitor-agent:1' "$good" systemd "cf-vps-monitor-agent-$good" "/opt/cf-vps-monitor/other" "/etc/x.env" "$d/state" > "$d/.cf-vps-monitor-owned"
+chmod 600 "$d/.cf-vps-monitor-owned"; probe line5
+# (2) 服务模式不符
+reset_root; d="$ROOT/root/$good"; mkdir -p "$d"
+printf '%s\\n' 'cf-vps-monitor-agent:1' "$good" openrc "cf-vps-monitor-agent-$good" "$d" "/etc/x.env" "$d/state" > "$d/.cf-vps-monitor-owned"
+chmod 600 "$d/.cf-vps-monitor-owned"; probe mode
+# (3) 服务名不安全
+reset_root; d="$ROOT/root/$good"; mkdir -p "$d"
+printf '%s\\n' 'cf-vps-monitor-agent:1' "$good" systemd 'bad name' "$d" "/etc/x.env" "$d/state" > "$d/.cf-vps-monitor-owned"
+chmod 600 "$d/.cf-vps-monitor-owned"; probe name
+# (4) 第 2 行 BASE_ID 为空
+reset_root; d="$ROOT/root/x"; mkdir -p "$d"
+printf '%s\\n' 'cf-vps-monitor-agent:1' "" systemd "cf-vps-monitor-agent-x" "$d" "/etc/x.env" "$d/state" > "$d/.cf-vps-monitor-owned"
+chmod 600 "$d/.cf-vps-monitor-owned"; probe empty2
+# (5) marker 不是常规文件（目录；文件符号链接在 Windows 上不可构造）
+reset_root; d="$ROOT/root/$good"; mkdir -p "$d/.cf-vps-monitor-owned"; probe nonfile
+# (6) group/other 可写（仅当 chmod 生效，如 Linux）
+reset_root; d="$ROOT/root/$good"; mkdir -p "$d"
+printf '%s\\n' 'cf-vps-monitor-agent:1' "$good" systemd "cf-vps-monitor-agent-$good" "$d" "/etc/x.env" "$d/state" > "$d/.cf-vps-monitor-owned"
+chmod 666 "$d/.cf-vps-monitor-owned"
+if [ "$(stat -c '%a' "$d/.cf-vps-monitor-owned" 2>/dev/null)" = 666 ]; then probe writable; else printf 'SKIP writable\\n'; fi
+# (7) 真正的文件符号链接（仅当 ln -s 真的建出符号链接，如 Linux）
+reset_root; d="$ROOT/root/$good"; mkdir -p "$d"
+printf '%s\\n' 'cf-vps-monitor-agent:1' "$good" systemd "cf-vps-monitor-agent-$good" "$d" "/etc/x.env" "$d/state" > "$d/real-marker"
+chmod 600 "$d/real-marker"
+if ln -s "$d/real-marker" "$d/.cf-vps-monitor-owned" 2>/dev/null && [ -L "$d/.cf-vps-monitor-owned" ]; then probe symlink; else printf 'SKIP symlink\\n'; fi
+`;
+    const out = stdoutOf(runShell(t, name, body).result);
+    const forged = out.split('\n').map(s => s.trim()).filter(s => s.startsWith('FORGED '));
+    assert.ok(forged.length >= 5, `${name} 伪造用例不足（${forged.length}），锁失效`);
+    for (const entry of forged) {
+      assert.match(entry.replace(/^FORGED \S+\s+/, ''), /^REJECTED$/, `${name} 采纳了伪造 marker：${entry}`);
+    }
+    for (const group of ['line5', 'mode', 'name', 'empty2', 'nonfile']) {
+      assert.ok(forged.some(l => l.startsWith(`FORGED ${group} `)), `${name} 缺少 ${group} 伪造用例`);
+    }
+  });
+
+  test(`U-S18 ${name} 显式 --instance-id 时发现逻辑不介入`, t => {
+    const body = `
+${discoveryDouble}
+id=${instanceId}
+d="$ROOT/root/$id"; mkdir -p "$d"
+printf '%s\\n' 'cf-vps-monitor-agent:1' "$id" systemd "cf-vps-monitor-agent-$id" "$d" "/etc/cf-vps-monitor-agent-$id.env" "$d/state" > "$d/.cf-vps-monitor-owned"
+chmod 600 "$d/.cf-vps-monitor-owned"
+UPGRADE=1; INSTANCE_ID=other; INSTALL_DIR=""; SERVICE_NAME=""; SERVICE_MODE=systemd
+agent_discover_upgrade_instance
+printf 'INSTANCE_ID=%s\\n' "$INSTANCE_ID"
+`;
+    const out = stdoutOf(runShell(t, name, body).result);
+    assert.match(out, /INSTANCE_ID=other/, `${name} 显式实例被覆盖`);
+    assert.doesNotMatch(out, /Reusing existing installation/, `${name} 显式实例时不应介入发现`);
+  });
+}
+
+test('U-S19 两个安装脚本的升级发现函数逐字等价', () => {
+  for (const fn of ['agent_upgrade_discovery_root', 'agent_discover_upgrade_instance']) {
+    const a = extractFunction(readScript('install.sh'), fn);
+    const b = extractFunction(readScript('install-linux.sh'), fn);
+    assert.ok(a.length > 0, `${fn} 不应为空`);
+    assert.equal(a, b, `${fn} 必须在两套安装器之间逐字一致，否则发现逻辑会漂移`);
+  }
+});
+
+test('U-S20 发现逻辑在服务模式解析之后、默认路径推导之前接入', () => {
+  const a = readScript('install.sh');
+  const modeA = a.indexOf('SERVICE_MODE="$(detect_service_mode)"');
+  const discoA = a.indexOf('\nagent_discover_upgrade_instance\n');
+  const applyA = a.indexOf('\napply_defaults\n');
+  assert.ok(modeA !== -1 && discoA !== -1 && applyA !== -1, 'install.sh 缺少接入点');
+  assert.ok(modeA < discoA && discoA < applyA, 'install.sh 发现逻辑必须在 detect_service_mode 之后、apply_defaults 之前');
+
+  const b = readScript('install-linux.sh');
+  const discoB = b.indexOf('\nagent_discover_upgrade_instance\n');
+  const applyB = b.indexOf('\napply_instance_defaults\n');
+  const modeB = b.lastIndexOf('SERVICE_MODE=systemd', discoB);
+  assert.ok(discoB !== -1 && applyB !== -1 && modeB !== -1, 'install-linux.sh 缺少接入点');
+  assert.ok(modeB < discoB && discoB < applyB, 'install-linux.sh 发现逻辑必须在设定 SERVICE_MODE 之后、apply_instance_defaults 之前');
+
+  for (const { name } of SCRIPTS) {
+    const guard = extractFunction(readScript(name), 'agent_discover_upgrade_instance');
+    assert.match(guard, /\[ "\$UPGRADE" = 1 \] \|\| return 0/, `${name} 缺少 UPGRADE 守卫`);
+    assert.match(guard, /-z "\$INSTANCE_ID" \] \|\| return 0/, `${name} 缺少 INSTANCE_ID 守卫`);
+    assert.match(guard, /-z "\$INSTALL_DIR" \] \|\| return 0/, `${name} 缺少 INSTALL_DIR 守卫`);
+    assert.match(guard, /-z "\$SERVICE_NAME" \] \|\| return 0/, `${name} 缺少 SERVICE_NAME 守卫`);
+    assert.match(guard, /agent_root_path_safe "\$discover_marker"/, `${name} 未对 marker 做所有权校验`);
+  }
+});
 
 // 结构性回归锁（跨脚本一致，不依赖 shell 执行环境）。
 

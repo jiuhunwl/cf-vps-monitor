@@ -1115,6 +1115,76 @@ agent_remove_upgrade_supervisors_for_all() (
   done
 )
 
+# --upgrade 自动发现：面板生成的手动升级命令不带 -i，而节点可能装在非默认实例上
+# （clients 表不含实例 ID，面板无从得知）。这里在推导默认路径之前，从已装实例的
+# `.cf-vps-monitor-owned` marker 里认出唯一实例。
+#
+# 触发条件（全部满足才生效，否则零行为变化）：UPGRADE=1 且 INSTANCE_ID/INSTALL_DIR/
+# SERVICE_NAME 均为空。任何显式值都优先，发现逻辑绝不介入。
+#
+# 信任边界（安全关键，切勿放宽）：只接受 root 拥有、非符号链接、且各级父目录均无
+# group/other 写位的 marker（复用 agent_root_path_safe 的判据）；且只从 marker 的
+# 「第 2 行 BASE_ID」取 INSTANCE_ID。绝不采信 marker 里的 INSTALL_DIR/ENV_FILE/
+# STATE_DIR —— 它们一律由随后的 apply_defaults 依据 BASE_ID 重新推导，再经
+# agent_assert_instance 二次校验。这样即便 marker 被伪造，也无法把 root 的升级目标
+# 重定向到任意路径。
+agent_upgrade_discovery_root() {
+  case "$SERVICE_MODE" in
+    systemd | openrc) printf '%s\n' "/opt/cf-vps-monitor" ;;
+    user) printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/cf-vps-monitor" ;;
+    launchctl) printf '%s\n' "/usr/local/cf-vps-monitor" ;;
+    *) : ;;
+  esac
+}
+
+agent_discover_upgrade_instance() {
+  [ "$UPGRADE" = 1 ] || return 0
+  [ -z "$INSTANCE_ID" ] || return 0
+  [ -z "$INSTALL_DIR" ] || return 0
+  [ -z "$SERVICE_NAME" ] || return 0
+  discover_root="$(agent_upgrade_discovery_root)" || return 0
+  [ -n "$discover_root" ] || return 0
+  AGENT_UPGRADE_DISCOVERY_ROOT="$discover_root"
+  AGENT_UPGRADE_DISCOVERY_HINT=" (searched ${discover_root} for an instance marker; pass --instance-id <id> if this node uses a custom instance)"
+  [ -d "$discover_root" ] && [ ! -L "$discover_root" ] || return 0
+  discover_ids=""
+  discover_dirs=""
+  discover_count=0
+  for discover_dir in "$discover_root"/*; do
+    [ -d "$discover_dir" ] && [ ! -L "$discover_dir" ] || continue
+    discover_marker="$discover_dir/.cf-vps-monitor-owned"
+    [ -f "$discover_marker" ] && [ ! -L "$discover_marker" ] || continue
+    agent_root_path_safe "$discover_marker" || continue
+    [ "$(sed -n '1p' "$discover_marker")" = "cf-vps-monitor-agent:1" ] || continue
+    [ "$(sed -n '3p' "$discover_marker")" = "$SERVICE_MODE" ] || continue
+    [ "$(sed -n '5p' "$discover_marker")" = "$discover_dir" ] || continue
+    discover_name="$(sed -n '4p' "$discover_marker")"
+    agent_service_name_is_safe "$discover_name" || continue
+    discover_id="$(sed -n '2p' "$discover_marker")"
+    [ -n "$discover_id" ] || continue
+    [ -n "$(sed -n '6p' "$discover_marker")" ] || continue
+    [ -n "$(sed -n '7p' "$discover_marker")" ] || continue
+    if [ -z "$discover_ids" ]; then
+      discover_ids="$discover_id"
+      discover_dirs="$discover_dir"
+    else
+      discover_ids="$discover_ids $discover_id"
+      discover_dirs="$discover_dirs $discover_dir"
+    fi
+    discover_count=$((discover_count + 1))
+  done
+  case "$discover_count" in
+    0) return 0 ;;
+    1)
+      INSTANCE_ID="$discover_ids"
+      printf '%s\n' "Reusing existing installation: cf-vps-monitor-agent-${INSTANCE_ID} (${discover_dirs})"
+      return 0 ;;
+    *)
+      printf '%s\n' "Found multiple existing installations under ${discover_root}: ${discover_dirs}. Re-run with --instance-id <id> to choose one: ${discover_ids}." >&2
+      exit 1 ;;
+  esac
+}
+
 is_root() {
   [ "$(id -u 2>/dev/null || echo 1)" = "0" ]
 }
@@ -1984,6 +2054,7 @@ PROXY="$(normalize_proxy_url "--proxy" "$PROXY")"
 INSTALL_GHPROXY="$(normalize_proxy_url "--install-ghproxy" "$INSTALL_GHPROXY")"
 require_https_url "--install-ghproxy" "$INSTALL_GHPROXY"
 SERVICE_MODE="$(detect_service_mode)"
+agent_discover_upgrade_instance
 apply_defaults
 
 if [ "$UNINSTALL_ALL" = "1" ]; then
@@ -1997,7 +2068,7 @@ if [ "$UNINSTALL" = "1" ]; then
 fi
 
 if [ "$UPGRADE" = "1" ]; then
-  [ -f "$INSTALL_DIR/cf-vps-monitor-agent" ] || die "--upgrade requires an existing installation at ${INSTALL_DIR}; run the installer without --upgrade first."
+  [ -f "$INSTALL_DIR/cf-vps-monitor-agent" ] || die "--upgrade requires an existing installation at ${INSTALL_DIR}${AGENT_UPGRADE_DISCOVERY_HINT:-}; run the installer without --upgrade first."
   agent_upgrade_load_config
 fi
 
