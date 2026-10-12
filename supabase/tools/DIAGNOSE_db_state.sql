@@ -9,8 +9,8 @@
 --
 -- 判定：
 --   - 全部 OK            -> 数据库已是最新，无需执行 UPGRADE_ALL_safe.sql
---   - 有「缺失」           -> 执行 supabase/migrations/UPGRADE_ALL_safe.sql 后再跑一次本脚本
---  本文件由官方迁移文件解析生成，共 392 个检查项
+--   - 有「缺失」           -> 执行 supabase/tools/UPGRADE_ALL_safe.sql 后再跑一次本脚本
+--  本文件由官方迁移文件解析生成，共 413 个检查项
 -- =====================================================================
 
 -- ① 版本标记速查 -------------------------------------------------------
@@ -46,6 +46,7 @@ with expected(kind, tbl, obj) as (
   values
     ('schema', null, 'public'),
     ('schema', null, 'cfm_internal'),
+    ('table', null, 'agent_upgrade_commands'),
     ('table', null, 'audit_logs'),
     ('table', null, 'clients'),
     ('table', null, 'expiry_notifications'),
@@ -64,6 +65,19 @@ with expected(kind, tbl, obj) as (
     ('table', null, 'users'),
     ('table', null, 'website_checks'),
     ('table', null, 'website_monitors'),
+    ('column', 'agent_upgrade_commands', 'client_uuid'),
+    ('column', 'agent_upgrade_commands', 'completed_at'),
+    ('column', 'agent_upgrade_commands', 'created_at'),
+    ('column', 'agent_upgrade_commands', 'dispatched_at'),
+    ('column', 'agent_upgrade_commands', 'failure_code'),
+    ('column', 'agent_upgrade_commands', 'failure_reason'),
+    ('column', 'agent_upgrade_commands', 'final_version'),
+    ('column', 'agent_upgrade_commands', 'from_version'),
+    ('column', 'agent_upgrade_commands', 'id'),
+    ('column', 'agent_upgrade_commands', 'requested_by'),
+    ('column', 'agent_upgrade_commands', 'status'),
+    ('column', 'agent_upgrade_commands', 'target_version'),
+    ('column', 'agent_upgrade_commands', 'updated_at'),
     ('column', 'audit_logs', 'action'),
     ('column', 'audit_logs', 'detail'),
     ('column', 'audit_logs', 'id'),
@@ -257,6 +271,8 @@ with expected(kind, tbl, obj) as (
     ('column', 'website_monitors', 'timeout_sec'),
     ('column', 'website_monitors', 'updated_at'),
     ('column', 'website_monitors', 'url'),
+    ('index', 'public', 'idx_agent_upgrade_commands_client'),
+    ('index', 'public', 'idx_agent_upgrade_commands_created'),
     ('index', 'public', 'idx_audit_logs_time'),
     ('index', 'public', 'idx_clients_sort_order'),
     ('index', 'public', 'idx_gpu_records_client_time'),
@@ -288,6 +304,7 @@ with expected(kind, tbl, obj) as (
     ('function', 'public', 'cfm_admin_clients'),
     ('function', 'public', 'cfm_agent_client_by_token'),
     ('function', 'public', 'cfm_agent_client_identity_by_token'),
+    ('function', 'public', 'cfm_agent_upgrade_tasks'),
     ('function', 'public', 'cfm_agent_website_probe_tasks'),
     ('function', 'public', 'cfm_audit_logs_paged'),
     ('function', 'public', 'cfm_backup_configuration_snapshot'),
@@ -311,6 +328,7 @@ with expected(kind, tbl, obj) as (
     ('function', 'public', 'cfm_complete_notification_delivery'),
     ('function', 'public', 'cfm_consume_recovery_code'),
     ('function', 'public', 'cfm_consume_totp_step'),
+    ('function', 'public', 'cfm_create_agent_upgrade_commands'),
     ('function', 'public', 'cfm_create_client'),
     ('function', 'public', 'cfm_create_initial_admin'),
     ('function', 'public', 'cfm_create_load_notification'),
@@ -332,6 +350,7 @@ with expected(kind, tbl, obj) as (
     ('function', 'public', 'cfm_due_website_monitors'),
     ('function', 'public', 'cfm_enable_user_totp'),
     ('function', 'public', 'cfm_ensure_initial_admin'),
+    ('function', 'public', 'cfm_expire_agent_upgrade_commands'),
     ('function', 'public', 'cfm_expired_row_counts'),
     ('function', 'public', 'cfm_expiry_notification'),
     ('function', 'public', 'cfm_expiry_notifications'),
@@ -348,6 +367,7 @@ with expected(kind, tbl, obj) as (
     ('function', 'public', 'cfm_latest_record_times'),
     ('function', 'public', 'cfm_latest_record_times_for_clients'),
     ('function', 'public', 'cfm_latest_records'),
+    ('function', 'public', 'cfm_list_agent_upgrade_commands'),
     ('function', 'public', 'cfm_load_metric_window_stats'),
     ('function', 'public', 'cfm_load_notification'),
     ('function', 'public', 'cfm_load_notifications'),
@@ -374,6 +394,7 @@ with expected(kind, tbl, obj) as (
     ('function', 'public', 'cfm_public_website_monitor'),
     ('function', 'public', 'cfm_public_websites'),
     ('function', 'public', 'cfm_recent_records'),
+    ('function', 'public', 'cfm_record_agent_upgrade_result'),
     ('function', 'public', 'cfm_record_login_failures'),
     ('function', 'public', 'cfm_record_website_check'),
     ('function', 'public', 'cfm_records_range'),
