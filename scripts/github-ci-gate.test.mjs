@@ -6,6 +6,20 @@ import { runGithubCiGate } from './github-ci-gate.mjs';
 const SHA = 'a'.repeat(40);
 const OTHER_SHA = 'b'.repeat(40);
 const ROOT = '/synthetic/check-out';
+// Synthetic wall-clock origin so GitHub's absolute X-RateLimit-Reset epochs are
+// meaningful to the injected clock (real reset headers are Unix seconds).
+const CLOCK_BASE = 1_700_000_000_000;
+
+/** Build a non-200 response carrying the headers GitHub sends on failures. */
+function errorResponse(status, { message, headers = {}, json } = {}) {
+  const body = json !== undefined ? json : (message === undefined ? {} : { message });
+  return { status, headers: new Headers(headers), json: async () => body };
+}
+
+/** X-RateLimit-Reset epoch (seconds) for a limit that resets this many ms from now. */
+function resetAt(msFromNow) {
+  return String((CLOCK_BASE + msFromNow) / 1000);
+}
 
 function workflow(overrides = {}) {
   return {
@@ -64,7 +78,7 @@ function fixture({
       return typeof next === 'function' ? next({ advance: ms => { elapsed += ms; } }) : next;
     },
     sleep: async ms => { calls.sleeps.push(ms); elapsed += ms; },
-    now: () => elapsed,
+    now: () => CLOCK_BASE + elapsed,
     log: message => calls.logs.push(message),
     ...settings,
   };
@@ -252,16 +266,121 @@ for (const [label, settings, code] of [
   });
 }
 
-for (const status of [401, 403, 429, 500]) {
-  test(`HTTP ${status} fails closed without reading or printing the response body`, async () => {
-    let bodyRead = false;
-    const f = fixture({ replies: [{ status, json: async () => { bodyRead = true; return {}; } }] });
+// Permission and server failures are not throttling: naming the cause and
+// stopping beats waiting for a limit that will never help.
+for (const status of [401, 403, 500, 502]) {
+  test(`HTTP ${status} without rate-limit evidence fails closed immediately`, async () => {
+    const f = fixture({ replies: [errorResponse(status, {
+      message: 'synthetic failure',
+      headers: { 'x-ratelimit-remaining': '4999', 'x-ratelimit-limit': '5000' },
+    })] });
     await assert.rejects(f.execute(), { code: 'HTTP_ERROR' });
-    assert.equal(bodyRead, false);
     assert.equal(f.calls.http.length, 1);
-    assert.equal(f.calls.sleeps.length, 0);
+    assert.equal(f.calls.sleeps.length, 0, 'a refused request must not be retried');
   });
 }
+
+test('a permission 403 reports the API message, remaining quota, and a token hint', async () => {
+  const f = fixture({ env: { GITHUB_TOKEN: 'synthetic-token' }, replies: [errorResponse(403, {
+    message: 'Resource not accessible by integration',
+    headers: { 'x-ratelimit-remaining': '42', 'x-ratelimit-limit': '5000', 'x-accepted-oauth-scopes': 'repo, workflow' },
+  })] });
+  await assert.rejects(f.execute(), error => {
+    assert.equal(error.code, 'HTTP_ERROR');
+    assert.match(error.message, /HTTP 403/);
+    assert.match(error.message, /Resource not accessible by integration/);
+    assert.match(error.message, /42\/5000 requests remaining/);
+    assert.match(error.message, /Actions: read/);
+    assert.match(error.message, /repo, workflow/);
+    return true;
+  });
+  assert.equal(f.calls.sleeps.length, 0);
+});
+
+test('a refused request with no token explicitly names 未配置 GITHUB_TOKEN as a cause', async () => {
+  const f = fixture({ replies: [errorResponse(403, {
+    message: 'Forbidden',
+    headers: { 'x-ratelimit-remaining': '59' },
+  })] });
+  await assert.rejects(f.execute(), error => {
+    assert.equal(error.code, 'HTTP_ERROR');
+    assert.match(error.message, /未配置 GITHUB_TOKEN/);
+    return true;
+  });
+});
+
+test('a rate-limited 403 waits for the reset window and then retries to success', async () => {
+  const f = fixture({ replies: [
+    errorResponse(403, { message: 'API rate limit exceeded', headers: {
+      'x-ratelimit-remaining': '0', 'x-ratelimit-limit': '60', 'x-ratelimit-reset': resetAt(60_000),
+    } }),
+    response([workflow()]),
+  ] });
+  const result = await f.execute();
+  assert.equal(result.sha, SHA);
+  assert.equal(f.calls.http.length, 2, 'the throttled request must be retried');
+  assert.deepEqual(f.calls.sleeps, [60_000], 'the wait must follow X-RateLimit-Reset');
+  assert.ok(f.calls.logs.some(message => /throttl/i.test(message)), 'the wait must be explained in the log');
+});
+
+test('a 429 without Retry-After still backs off for the poll interval before retrying', async () => {
+  const f = fixture({ replies: [
+    errorResponse(429, { message: 'Too many requests' }),
+    response([workflow()]),
+  ] });
+  const result = await f.execute();
+  assert.equal(result.sha, SHA);
+  assert.deepEqual(f.calls.sleeps, [30_000]);
+});
+
+test('a 429 with Retry-After waits exactly the advertised delay', async () => {
+  const f = fixture({ replies: [
+    errorResponse(429, { message: 'You have exceeded a secondary rate limit', headers: { 'retry-after': '45' } }),
+    response([workflow()]),
+  ] });
+  const result = await f.execute();
+  assert.equal(result.sha, SHA);
+  assert.deepEqual(f.calls.sleeps, [45_000]);
+  assert.equal(f.calls.http.length, 2);
+});
+
+test('a rate limit that resets after the deployment window fails with how long to wait', async () => {
+  const f = fixture({ replies: [errorResponse(403, {
+    message: 'API rate limit exceeded',
+    headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-limit': '60', 'x-ratelimit-reset': resetAt(20 * 60_000) },
+  })] });
+  await assert.rejects(f.execute(), error => {
+    assert.equal(error.code, 'RATE_LIMITED');
+    assert.match(error.message, /resets in 20m/);
+    assert.match(error.message, /deployment window/);
+    return true;
+  });
+  assert.equal(f.calls.sleeps.length, 0, 'an unmeetable reset must not be waited on');
+});
+
+test('waiting through a rate limit never lets an eventually-failed CI pass', async () => {
+  const f = fixture({ replies: [
+    errorResponse(403, { message: 'API rate limit exceeded', headers: {
+      'x-ratelimit-remaining': '0', 'x-ratelimit-reset': resetAt(60_000),
+    } }),
+    response([workflow({ conclusion: 'failure' })]),
+  ] });
+  await assert.rejects(f.execute(), { code: 'CI_NOT_SUCCESSFUL' });
+  assert.deepEqual(f.calls.sleeps, [60_000]);
+});
+
+test('rate-limit and permission diagnostics never print the token', async () => {
+  const sensitive = randomUUID();
+  const f = fixture({ env: { GITHUB_TOKEN: sensitive }, replies: [errorResponse(403, {
+    message: `forbidden for ${sensitive}`,
+    headers: { 'x-ratelimit-remaining': '10' },
+  })] });
+  await assert.rejects(f.execute(), error => {
+    assert.equal(error.message.includes(sensitive), false);
+    assert.equal(f.calls.logs.join('\n').includes(sensitive), false);
+    return true;
+  });
+});
 
 for (const [label, body] of [
   ['missing run array', {}],

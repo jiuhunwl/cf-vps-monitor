@@ -75,6 +75,107 @@ function latestWorkflowRun(payload, sha, repository) {
   return latest;
 }
 
+/** Redact an authentication secret from any diagnostic text before it is logged or thrown. */
+function redactSecret(text, secret) {
+  if (typeof text !== 'string' || text === '' || typeof secret !== 'string' || secret === '') return text;
+  return text.split(secret).join('***');
+}
+
+/** Collapse control characters so a remote API message cannot inject lines into build logs. */
+function sanitizeMessage(value) {
+  if (typeof value !== 'string') return '';
+  const collapsed = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return collapsed.length > 300 ? `${collapsed.slice(0, 297)}...` : collapsed;
+}
+
+function readHeader(response, name) {
+  try {
+    const value = response?.headers?.get?.(name);
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+  } catch { return null; }
+}
+
+function parseIntegerHeader(value) {
+  if (value === null || !/^-?\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/** Parse Retry-After (delay-seconds or HTTP-date) into a millisecond wait. */
+function parseRetryAfterMs(value, nowMs) {
+  if (value === null) return null;
+  if (/^\d+$/.test(value)) {
+    const seconds = Number(value);
+    return Number.isSafeInteger(seconds) ? seconds * 1000 : null;
+  }
+  const target = Date.parse(value);
+  return Number.isNaN(target) ? null : Math.max(0, target - nowMs);
+}
+
+/** Read the JSON `message` from a failed response without ever echoing the token. */
+async function readResponseMessage(response, secret) {
+  if (!response || typeof response.json !== 'function') return '';
+  try {
+    const payload = await response.json();
+    const message = typeof payload === 'string' ? payload : payload?.message;
+    return redactSecret(sanitizeMessage(message), secret);
+  } catch { return ''; }
+}
+
+function formatDuration(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return seconds % 60 ? `${minutes}m${seconds % 60}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 ? `${hours}h${minutes % 60}m` : `${hours}h`;
+}
+
+/**
+ * Turn a non-200 GitHub response into an actionable, secret-free diagnosis and
+ * decide whether the request was throttled (worth waiting for) or refused.
+ */
+async function diagnoseHttpFailure(response, { secret, tokenPresent, nowMs }) {
+  const message = await readResponseMessage(response, secret);
+  const remaining = parseIntegerHeader(readHeader(response, 'x-ratelimit-remaining'));
+  const limit = parseIntegerHeader(readHeader(response, 'x-ratelimit-limit'));
+  const resetSeconds = parseIntegerHeader(readHeader(response, 'x-ratelimit-reset'));
+  const resetAtMs = resetSeconds === null ? null : resetSeconds * 1000;
+  const retryAfterMs = parseRetryAfterMs(readHeader(response, 'retry-after'), nowMs);
+  const scopes = redactSecret(readHeader(response, 'x-accepted-oauth-scopes'), secret);
+  const mentionsRateLimit = /rate limit|secondary rate/i.test(message);
+  const rateLimited = response.status === 429 || remaining === 0 || retryAfterMs !== null || mentionsRateLimit;
+
+  const authLabel = tokenPresent ? 'authenticated' : 'unauthenticated';
+  const quota = remaining === null ? '' : `; ${limit === null ? remaining : `${remaining}/${limit}`} requests remaining`;
+  const resetLabel = resetAtMs === null ? '' : `; resets in ${formatDuration(Math.max(0, resetAtMs - nowMs))}`;
+  const retryLabel = retryAfterMs === null ? '' : `; retry after ${formatDuration(retryAfterMs)}`;
+  const scopeLabel = scopes === null ? '' : `; accepted scope${scopes === '' ? 's' : ''}: ${scopes || '(none)'}`;
+  const summary = `${message || 'the API rejected the request'} (${authLabel}${quota}${resetLabel}${retryLabel}${scopeLabel})`;
+
+  let waitMs = null;
+  if (retryAfterMs !== null) waitMs = retryAfterMs;
+  else if (resetAtMs !== null) waitMs = Math.max(0, resetAtMs - nowMs);
+
+  return { rateLimited, waitMs, summary, scopes };
+}
+
+/** Hints naming the most likely cause of a refused (non-throttled) request. */
+function permissionHints(tokenPresent, scopes) {
+  const hints = [];
+  if (tokenPresent) {
+    hints.push('the configured GITHUB_TOKEN was rejected; confirm it is valid, not expired, and granted the "Actions: read" permission');
+  } else {
+    hints.push('no GITHUB_TOKEN was provided (未配置 GITHUB_TOKEN); set a token with the "Actions: read" permission to authenticate the request');
+  }
+  if (scopes) hints.push(`GitHub expects one of these scopes: ${scopes}`);
+  return `Hints: ${hints.join('; ')}.`;
+}
+
+function rateLimitTokenHint(tokenPresent) {
+  return tokenPresent ? '' : ' Configure a GITHUB_TOKEN with "Actions: read" to raise the shared API limit from 60/h to 5000/h.';
+}
+
 /** Wait for the latest push CI run for this clean checkout; never build or deploy. */
 export async function runGithubCiGate({
   root = defaultRoot,
@@ -141,7 +242,29 @@ export async function runGithubCiGate({
         response = await fetchImpl(url.href, { method: 'GET', headers, signal, redirect: 'error', cache: 'no-store' });
       } catch { fail('NETWORK_ERROR', 'the GitHub request failed or timed out; deployment stopped.'); }
       if (!Number.isInteger(response?.status)) fail('INVALID_RESPONSE', 'GitHub returned an invalid HTTP response.');
-      if (response.status !== 200) fail('HTTP_ERROR', `GitHub returned HTTP ${response.status}; deployment stopped.`);
+      if (response.status !== 200) {
+        const failure = await diagnoseHttpFailure(response, { secret: token, tokenPresent: Boolean(token), nowMs: now() });
+        if (failure.rateLimited) {
+          // Throttled: GitHub is reachable, so wait for the reset inside the
+          // existing deadline and retry instead of aborting the deployment.
+          const budget = deadline - now();
+          const requested = failure.waitMs;
+          const waitMs = requested !== null && requested > 0
+            ? requested
+            : Math.min(pollMs, Math.max(1, Math.floor(budget)));
+          if (!Number.isFinite(waitMs) || waitMs <= 0 || waitMs >= budget) {
+            fail('RATE_LIMITED', `GitHub throttled the request (HTTP ${response.status}): ${failure.summary}. `
+              + `The limit will not reset within the remaining deployment window (${formatDuration(Math.max(0, budget))} left`
+              + `${requested !== null && requested > 0 ? `, reset expected in ${formatDuration(requested)}` : ''}); deployment stopped.`
+              + rateLimitTokenHint(Boolean(token)));
+          }
+          log(`GitHub throttled the request (HTTP ${response.status}): ${failure.summary}. Waiting ${formatDuration(waitMs)} before retrying.`);
+          await sleep(waitMs);
+          continue;
+        }
+        // Refused: authentication or permission problem that waiting cannot fix.
+        fail('HTTP_ERROR', `GitHub returned HTTP ${response.status}: ${failure.summary}. ${permissionHints(Boolean(token), failure.scopes)}`);
+      }
       let payload;
       try { payload = await response.json(); } catch {
         if (signal.aborted) fail('NETWORK_ERROR', 'the GitHub response timed out; deployment stopped.');
