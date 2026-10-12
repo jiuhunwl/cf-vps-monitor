@@ -1,4 +1,4 @@
-// 临时脚本：从 UPGRADE_ALL_safe.sql 解析 v2.0.4 完整对象契约，生成只读诊断 SQL
+// 临时脚本：从 UPGRADE_ALL_safe.sql 解析完整对象契约，生成只读诊断 SQL
 // 用法：node scripts/gen-diagnose-sql.mjs
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
