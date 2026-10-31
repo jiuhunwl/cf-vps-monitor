@@ -48,7 +48,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ## 面板部署
 
-在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.9`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
+在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.10`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
 
 ### Fork 本仓库部署【推荐，方便更新】
 
