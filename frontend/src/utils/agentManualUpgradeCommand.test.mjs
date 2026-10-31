@@ -49,18 +49,20 @@ test('the shared GitHub mirror validation also fails closed for install and unin
   }
 });
 
-test('manual bootstrap defaults to direct access and the legacy default instance without new credentials', () => {
+test('manual bootstrap defaults to the built-in accelerator and the legacy default instance without new credentials', () => {
   for (const releaseTag of ['', 'latest']) {
     const unix = buildAgentManualUpgradeCommand({ platform: 'unix', options: options({ releaseTag }) });
     assert.ok(!unix.includes('\n'), 'the default manual upgrade command must be a single copy-paste line');
     assert.ok(unix.includes('| sh -s -- '), 'the manual upgrade command mirrors the install/uninstall pipe shape');
+    assert.ok(unix.includes(`${GITHUB_PROXY_PRESETS[0]}/https://raw.githubusercontent.com/`), '国内服务器默认走加速镜像');
+    assert.ok(unix.includes('--install-ghproxy'), '加速前缀必须同时写进监督单元，之后面板下发升级才走镜像');
     assert.ok(unix.includes('/refs/heads/main/agent/install.sh'));
     assert.ok(!unix.includes('--instance-id'));
     assert.ok(!unix.includes('--release-tag'));
-    assert.ok(!unix.includes('gh-proxy.org'));
     assert.ok(!unix.includes('--server') && !unix.includes('--token'));
     const windows = decodePowerShell(buildAgentManualUpgradeCommand({ platform: 'windows', options: options({ releaseTag }) }));
     assert.ok(windows.includes('/refs/heads/main/agent/install-windows.ps1'));
+    assert.ok(windows.includes(GITHUB_PROXY_PRESETS[0]), 'Windows 默认同样预填加速前缀');
     assert.ok(!windows.includes('-InstanceId'));
     assert.ok(!windows.includes('-ReleaseTag'));
     assert.ok(!windows.includes('-Server') && !windows.includes('-Token'));

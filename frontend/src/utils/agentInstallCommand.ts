@@ -2,6 +2,16 @@ import { CF_MONITOR_BRANCH, CF_MONITOR_REPOSITORY } from './projectLinks';
 
 export type AgentInstallPlatform = 'unix' | 'windows';
 
+/** 国内服务器普遍无法直连 GitHub；安装/升级都校验 SHA256，镜像无法静默调包。
+ *  默认预填第一组加速前缀，用户可改选预设或清空直连。 */
+export const GITHUB_PROXY_PRESETS = [
+  'https://gh-proxy.org',
+  'https://v4.gh-proxy.org',
+  'https://v6.gh-proxy.org',
+  'https://cdn.gh-proxy.org',
+  'https://axisnow.gh-proxy.org',
+] as const;
+
 export type AgentInstallOptions = {
   ghproxy: string;
   downloadProxy: string;
@@ -20,7 +30,7 @@ export type AgentInstallOptions = {
 };
 
 export const defaultAgentInstallOptions: AgentInstallOptions = {
-  ghproxy: '',
+  ghproxy: GITHUB_PROXY_PRESETS[0],
   downloadProxy: '',
   installMode: 'auto',
   dir: '',
@@ -105,14 +115,6 @@ export function normalizeProxyUrl(value: string, allowPath = true) {
   }
   return '';
 }
-
-export const GITHUB_PROXY_PRESETS = [
-  'https://gh-proxy.org',
-  'https://v4.gh-proxy.org',
-  'https://v6.gh-proxy.org',
-  'https://cdn.gh-proxy.org',
-  'https://axisnow.gh-proxy.org',
-] as const;
 
 /** A content mirror is not an HTTP CONNECT proxy: downloads must stay HTTPS. */
 export function normalizeGitHubProxyUrl(value: string) {
@@ -313,7 +315,7 @@ export type AgentManualUpgradeOptions = {
 };
 
 export const defaultAgentManualUpgradeOptions: AgentManualUpgradeOptions = {
-  ghproxy: '', downloadProxy: '', installMode: 'auto', instanceId: '',
+  ghproxy: GITHUB_PROXY_PRESETS[0], downloadProxy: '', installMode: 'auto', instanceId: '',
   dir: '', serviceName: '', releaseTag: '',
 };
 

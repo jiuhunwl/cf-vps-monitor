@@ -16,7 +16,8 @@ const { CF_MONITOR_REPOSITORY } = await import(pathToFileURL(join(tmp, 'projectL
 const base = {
   serverUrl: 'https://panel.example',
   token: 'token123',
-  options: { ...defaultAgentInstallOptions },
+  // 直连基线：默认值已预填 GitHub 加速前缀，测其他参数的管道时显式关掉。
+  options: { ...defaultAgentInstallOptions, ghproxy: '' },
   instanceId: '33bc95df-513d-41be-8d98-30979fb17029',
   nodeName: 'node-123',
 };
@@ -30,7 +31,7 @@ assert.equal(
   buildAgentInstallCommand({
     platform: 'unix',
     ...base,
-    options: { ...defaultAgentInstallOptions, trafficResetDay: '15', downloadProxy: '127.0.0.1:10808' },
+    options: { ...defaultAgentInstallOptions, ghproxy: '', trafficResetDay: '15', downloadProxy: '127.0.0.1:10808' },
   }),
   `wget -qO- 'https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/main/agent/install.sh' | sh -s -- '-s' 'https://panel.example' '-t' 'token123' '-r' '15' '-n' 'node-123' '-i' '33bc95df-513d-41be-8d98-30979fb17029' '--proxy' 'http://127.0.0.1:10808'`,
 );
@@ -39,7 +40,7 @@ assert.equal(
   buildAgentInstallCommand({
     platform: 'unix',
     ...base,
-    options: { ...defaultAgentInstallOptions, installMode: 'user' },
+    options: { ...defaultAgentInstallOptions, ghproxy: '', installMode: 'user' },
   }),
   `wget -qO- 'https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/main/agent/install.sh' | sh -s -- '-s' 'https://panel.example' '-t' 'token123' '-n' 'node-123' '-i' '33bc95df-513d-41be-8d98-30979fb17029' '--install-mode' 'user'`,
 );
@@ -47,6 +48,12 @@ assert.equal(
 assert.equal(
   buildAgentUninstallAllCommand({ platform: 'unix' }),
   `wget -qO- 'https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/main/agent/install.sh' | sh -s -- '--uninstall-all' '--yes'`,
+);
+
+assert.equal(
+  buildAgentInstallCommand({ platform: 'unix', ...base, options: { ...defaultAgentInstallOptions } }),
+  `wget -qO- 'https://gh-proxy.org/https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/main/agent/install.sh' | sh -s -- '-s' 'https://panel.example' '-t' 'token123' '-n' 'node-123' '-i' '33bc95df-513d-41be-8d98-30979fb17029' '--install-ghproxy' 'https://gh-proxy.org'`,
+  '默认值必须预填 GitHub 加速前缀：脚本下载与二进制下载都走镜像，国内服务器开箱即可用',
 );
 
 await rm(tmp, { recursive: true, force: true });
