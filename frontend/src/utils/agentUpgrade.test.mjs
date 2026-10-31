@@ -395,6 +395,20 @@ test('createAgentUpgrade 对 latest / 缺省目标不发送 target_version', asy
   assert.deepEqual(bodies[1], { uuids: ['a'] });
 });
 
+test('createAgentUpgrade 携带面板选择的 GitHub 加速前缀', async () => {
+  const bodies = [];
+  const fakeFetch = async (_path, options) => {
+    bodies.push(JSON.parse(options.body));
+    return { success: true, commands: [] };
+  };
+  await createAgentUpgrade(fakeFetch, ['a'], 'v1.0.2', 'https://gh-proxy.org');
+  await createAgentUpgrade(fakeFetch, ['a'], 'v1.0.2', '');
+  await createAgentUpgrade(fakeFetch, ['a'], 'v1.0.2', '   ');
+  assert.deepEqual(bodies[0], { uuids: ['a'], target_version: 'v1.0.2', ghproxy: 'https://gh-proxy.org' });
+  assert.deepEqual(bodies[1], { uuids: ['a'], target_version: 'v1.0.2' }, '空代理 = 直连，不下发 ghproxy');
+  assert.deepEqual(bodies[2], { uuids: ['a'], target_version: 'v1.0.2' }, '空白代理视同直连');
+});
+
 test('createAgentUpgrade 在 success:false 时抛出后端 error 文本', async () => {
   await assert.rejects(
     () => createAgentUpgrade(async () => ({ success: false, error: '目标版本无效' }), ['a'], 'v0'),

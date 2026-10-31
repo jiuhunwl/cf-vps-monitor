@@ -760,8 +760,9 @@ export async function createAgentUpgradeCommands(
   clientUuids: string[],
   targetVersion: string,
   requestedBy: string,
+  ghproxy = '',
 ): Promise<t.CreateAgentUpgradeCommandsResult> {
-  return sba.createAgentUpgradeCommands(database.env, clientUuids, targetVersion, requestedBy);
+  return sba.createAgentUpgradeCommands(database.env, clientUuids, targetVersion, requestedBy, ghproxy);
 }
 
 /** 给 policy 下发的未决命令取一条，带短 TTL 缓存以避免高频心跳打爆 DO 子请求预算。*/

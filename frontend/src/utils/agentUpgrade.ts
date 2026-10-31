@@ -633,9 +633,11 @@ export async function createAgentUpgrade(
   apiFetch: ApiFetchFn,
   uuids: string[],
   targetVersion?: string | null,
+  ghproxy?: string,
 ): Promise<CreateAgentUpgradeResponse> {
-  const body: { uuids: string[]; target_version?: string } = { uuids };
+  const body: { uuids: string[]; target_version?: string; ghproxy?: string } = { uuids };
   if (targetVersion && !isLatestTargetToken(targetVersion)) body.target_version = targetVersion;
+  if (ghproxy && ghproxy.trim() !== '') body.ghproxy = ghproxy.trim();
   const payload = asRecord(await apiFetch(AGENT_UPGRADE_CREATE_PATH, {
     method: 'POST',
     body: JSON.stringify(body),

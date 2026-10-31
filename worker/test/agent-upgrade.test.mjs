@@ -7,7 +7,7 @@
  *   2) 交叉校验：success 但 final_version != target_version → unverified（SQL 层）。
  *   3) 失败/回滚类不改版本语义（SQL 层）。
  *   4) upgrade_results 落库失败不影响 /report 主链路（生产receipt helper）。
- *   5) upgradeTasksForPolicy 只下发 {id, target_version}，绝不包含 release_base/proxy/ghproxy。
+ *   5) upgradeTasksForPolicy 只下发 {id, target_version, ghproxy?}，绝不包含 release_base/proxy。
  *
  * SQL 层语义（1-3）在本机无 Supabase 连接时无法直接跑 —— 这些由 SQL 函数体本身的
  * 等价性自检（见 cmp_sql.py 思路）与 supabase-api 集成测试覆盖。本文件聚焦可以
@@ -51,18 +51,22 @@ test('resolveReleaseRepository 支持 CF_MONITOR_RELEASE_REPOSITORY 覆盖（for
 /* AgentUpgradeTask 最小集：绝不携带下载来源                           */
 /* ------------------------------------------------------------------ */
 
-test('AgentUpgradeTask 契约只含 id 与 target_version，无 release_base/proxy/ghproxy', () => {
-  // 这是 T03 安全契约的硬约束：Worker 下发的升级任务只能含 {id, target_version}。
-  // release_base / proxy / ghproxy 由 root 侧安装器 argv 决定，若 Worker 端补全，
-  // 等于把 T01/T02 堵住的提权路径重新开回来。
-  // 这里通过 types.ts 的类型定义与 buildAgentPolicy/upgradeTasksForPolicy 的实现保证。
-  // 我们用一个最小约束断言：合法下发对象只能有这两个键。
-  const validTask = { id: 'cmd-1', target_version: 'v1.0.2' };
-  const forbiddenKeys = ['release_base', 'proxy', 'ghproxy'];
-  for (const key of forbiddenKeys) {
-    assert.ok(!(key in validTask), `upgrade task 不应携带 ${key}`);
+test('AgentUpgradeTask 契约：id + target_version + 可选 ghproxy，无 release_base/proxy', () => {
+  // T03 原始契约是 {id, target_version}；ghproxy 后续经所有者决策放开为
+  // 面板侧显式选择的 GitHub 加速前缀（RPC 与 Worker 双重 https 校验，节点侧
+  // 仍校验 SHA256SUMS，镜像无法静默调包）。release_base / proxy 依旧禁止——
+  // 下载来源的选择权在面板管理员显式输入，其余 root 侧下载参数仍归安装器 argv。
+  const directTask = { id: 'cmd-1', target_version: 'v1.0.2' };
+  const proxiedTask = { ...directTask, ghproxy: 'https://gh-proxy.org' };
+  const forbiddenKeys = ['release_base', 'proxy'];
+  for (const task of [directTask, proxiedTask]) {
+    for (const key of forbiddenKeys) {
+      assert.ok(!(key in task), `upgrade task 不应携带 ${key}`);
+    }
   }
-  assert.deepEqual(Object.keys(validTask).sort(), ['id', 'target_version']);
+  if ('ghproxy' in proxiedTask) {
+    assert.ok(proxiedTask.ghproxy.startsWith('https://'), 'ghproxy 只能是 https 前缀');
+  }
 });
 
 /* ------------------------------------------------------------------ */

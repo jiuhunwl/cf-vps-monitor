@@ -1202,6 +1202,7 @@ export function createAgentUpgradeCommands(
   clientUuids: string[],
   targetVersion: string,
   requestedBy: string,
+  ghproxy = '',
 ): Promise<CreateAgentUpgradeCommandsResult> {
   return callSupabaseRpc<CreateAgentUpgradeCommandsResult>(
     env,
@@ -1211,6 +1212,7 @@ export function createAgentUpgradeCommands(
         client_uuids: clientUuids,
         target_version: targetVersion,
         requested_by: requestedBy,
+        ghproxy,
       },
     },
   );

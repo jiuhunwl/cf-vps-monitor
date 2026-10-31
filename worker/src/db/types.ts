@@ -481,6 +481,7 @@ export interface AgentUpgradeCommand {
   client_uuid: string;
   target_version: string;
   requested_by: string;
+  ghproxy: string;
   status: AgentUpgradeCommandStatus;
   from_version: string | null;
   final_version: string | null;
@@ -492,12 +493,14 @@ export interface AgentUpgradeCommand {
   updated_at: string;
 }
 
-/** 下发到 policy 的最小集 —— 只取节点侧需要的两个字段。
- *  注意：release_base / proxy / ghproxy 由 root 侧安装器 argv 决定，
- *  Worker 永远不下发这三个字段（否则等于把提权路径开回来）。*/
+/** 下发到 policy 的升级命令。ghproxy 是面板侧显式选择的 GitHub 加速前缀：
+ *  仅接受 https 源站前缀（RPC 与 Worker 双重校验），节点侧升级流程仍校验
+ *  SHA256SUMS，镜像无法静默调包。release_base / proxy 依旧永不下发——
+ *  下载来源的选择权归面板管理员显式输入，下载内容的完整性归节点校验。 */
 export interface AgentUpgradeTask {
   id: string;
   target_version: string;
+  ghproxy?: string;
 }
 
 /** 来自 Report.upgrade_results 的回执项，键名与 agent/upgrade_state.go:96 一致。*/
@@ -525,6 +528,7 @@ export interface CreateAgentUpgradeCommandsResult {
   skipped: AgentUpgradeSkipped[];
   commands: AgentUpgradeCommand[];
   invalid_target?: boolean;
+  invalid_ghproxy?: boolean;
 }
 
 export interface ExpireAgentUpgradeCommandsResult {

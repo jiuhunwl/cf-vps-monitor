@@ -9,6 +9,8 @@ import { Badge, Box, Button, Checkbox, Dialog, Flex, Separator, Text } from '@ra
 import { ArrowUpCircle, ClipboardCopy, Info, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useApi } from '../../contexts/AuthContext';
+import GitHubProxyInput from './GitHubProxyInput';
+import { GITHUB_PROXY_PRESETS } from '../../utils/agentInstallCommand';
 import {
   AgentUpgradeCommand,
   DEFAULT_UPGRADE_BATCH_SIZE,
@@ -122,6 +124,9 @@ export default function AgentUpgradeDialog({
   const [started, setStarted] = useState(false);
   const [batchCurrent, setBatchCurrent] = useState(0);
   const [downgradeConfirmed, setDowngradeConfirmed] = useState(false);
+  // GitHub 加速前缀：随下发命令逐次写入节点，"一律使用选择代理"——每次打开弹窗
+  // 重置为默认预设，由管理员当场确认或改选。
+  const [ghproxy, setGhproxy] = useState<string>(GITHUB_PROXY_PRESETS[0]);
 
   const cancelledRef = useRef(false);
   const timersRef = useRef<Map<number, () => void>>(new Map());
@@ -161,6 +166,7 @@ export default function AgentUpgradeDialog({
     setStarted(false);
     setBatchCurrent(0);
     setDowngradeConfirmed(false);
+    setGhproxy(GITHUB_PROXY_PRESETS[0]);
     setReleaseError(null);
     setResolvedTarget(targetVersion ?? null);
     if (targetVersion) return;
@@ -228,7 +234,7 @@ export default function AgentUpgradeDialog({
         intervalMs: DEFAULT_UPGRADE_POLL_INTERVAL_MS,
         isCancelled: () => cancelledRef.current,
         dispatch: async (batch) => {
-          const result = await createAgentUpgrade(apiFetch, batch, target);
+          const result = await createAgentUpgrade(apiFetch, batch, target, ghproxy);
           for (const skipped of result.skipped) {
             toast.message(`${skipped.client_uuid.slice(0, 8)} 已跳过：${describeSkipReason(skipped.reason)}`);
           }
@@ -251,13 +257,13 @@ export default function AgentUpgradeDialog({
     } finally {
       setRunning(false);
     }
-  }, [apiFetch, downgradeConfirmed, hasDowngrade, mergeCommands, partition.toUpgrade, resolvedTarget, running, sleep]);
+  }, [apiFetch, downgradeConfirmed, ghproxy, hasDowngrade, mergeCommands, partition.toUpgrade, resolvedTarget, running, sleep]);
 
   const retryNode = useCallback(async (uuid: string) => {
     const target = resolvedTarget;
     if (!target || running) return;
     try {
-      const result = await createAgentUpgrade(apiFetch, [uuid], target);
+      const result = await createAgentUpgrade(apiFetch, [uuid], target, ghproxy);
       mergeCommands(result.commands);
       const ids = result.commands.map((command) => command.id).filter(Boolean);
       await pollUpgradeStatus({
@@ -272,7 +278,7 @@ export default function AgentUpgradeDialog({
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '重试失败');
     }
-  }, [apiFetch, mergeCommands, resolvedTarget, running, sleep]);
+  }, [apiFetch, ghproxy, mergeCommands, resolvedTarget, running, sleep]);
 
   const canStart = Boolean(resolvedTarget) && partition.toUpgrade.length > 0 && !running && (!hasDowngrade || downgradeConfirmed);
   const targetLabel = resolvedTarget ? normalizeAgentVersion(resolvedTarget) : releaseLoading ? '正在获取…' : '未知';
@@ -298,6 +304,12 @@ export default function AgentUpgradeDialog({
             <Badge size="2" variant="soft" color="gray">已最新跳过 {partition.skipped.length}</Badge>
             <Text size="1" color="gray">每批 {DEFAULT_UPGRADE_BATCH_SIZE} 个串行推进</Text>
           </Flex>
+
+          {!started && (
+            <Box mb="2">
+              <GitHubProxyInput value={ghproxy} onChange={setGhproxy} />
+            </Box>
+          )}
 
           {hasDowngrade && !started && (
             <Box mb="2" p="2" className="agent-upgrade-downgrade-warning">

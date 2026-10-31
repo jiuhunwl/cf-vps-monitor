@@ -3347,6 +3347,11 @@ adminRoutes.post('/agents/upgrade', async (c) => {
     }
     const rawTarget = typeof body.target_version === 'string' ? body.target_version.trim() : '';
     const requestedBy = c.get('username') || '';
+    // GitHub 加速前缀：空 = 直连。与 SQL 侧同一条校验，节点引擎还会再做严格校验。
+    const rawGhproxy = typeof body.ghproxy === 'string' ? body.ghproxy.trim() : '';
+    if (rawGhproxy.length > 200 || (rawGhproxy !== '' && !/^https:\/\/[a-z0-9][a-z0-9.-]*(:[0-9]+)?(\/[a-z0-9._~:/-]*)?$/i.test(rawGhproxy))) {
+      return c.json({ success: false, error: 'ghproxy 必须是以 https:// 开头的源站前缀，不能含账号密码、查询参数或片段' }, 400);
+    }
 
     const database = getDatabase(c.env);
 
@@ -3364,7 +3369,7 @@ adminRoutes.post('/agents/upgrade', async (c) => {
 
     // RPC 内部已处理「每节点仅 1 条未决」「节点不存在跳过」等语义
     const rpcResult = await timed(metrics, 'create_commands', () =>
-      db.createAgentUpgradeCommands(database, uuids, targetVersion, requestedBy),
+      db.createAgentUpgradeCommands(database, uuids, targetVersion, requestedBy, rawGhproxy),
     );
 
     // 写审计日志（后台，不阻塞响应）
@@ -3372,7 +3377,7 @@ adminRoutes.post('/agents/upgrade', async (c) => {
       database,
       requestedBy,
       'agent_upgrade_create',
-      `下发升级命令: target=${targetVersion}; uuids=${uuids.join(',')}; created=${rpcResult.created}; skipped=${JSON.stringify(rpcResult.skipped)}`,
+      `下发升级命令: target=${targetVersion}; ghproxy=${rawGhproxy || '(直连)'}; uuids=${uuids.join(',')}; created=${rpcResult.created}; skipped=${JSON.stringify(rpcResult.skipped)}`,
     ));
 
     return c.json({

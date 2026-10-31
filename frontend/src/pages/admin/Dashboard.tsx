@@ -1134,6 +1134,12 @@ export default function AdminDashboard() {
     [selectedClients, agentLatestVersion],
   );
   const batchUpgradeDisabled = agentLatestVersion !== null && upgradableSelectedCount === 0;
+  // 一键升级：对当前筛选出的全部节点下发（已最新的会被弹窗跳过）。
+  const upgradableAllCount = useMemo(
+    () => countUpgradableTargets(filtered, agentLatestVersion),
+    [filtered, agentLatestVersion],
+  );
+  const allUpgradeDisabled = filtered.length === 0 || (agentLatestVersion !== null && upgradableAllCount === 0);
 
   const openUpgradeForNodes = useCallback((uuids: string[]) => {
     const target = new Set(uuids);
@@ -1247,6 +1253,14 @@ export default function AdminDashboard() {
                 <Button variant="ghost" size="1" onClick={() => setSelectedNodes([])}>清除</Button>
               </Flex>
             )}
+
+            <Tooltip content={agentLatestVersion
+              ? `将当前筛选的 ${filtered.length} 个节点升级到 ${agentLatestVersion}，已最新的自动跳过`
+              : '一键升级所有节点（目标版本为最新发布）'}>
+              <Button variant="soft" size="1" disabled={allUpgradeDisabled} onClick={() => openUpgradeForNodes(filtered.map((client) => client.uuid))}>
+                <ArrowUpCircle size={14} /> 一键升级
+              </Button>
+            </Tooltip>
 
             <Select.Root value={selectedGroup} onValueChange={setSelectedGroup}>
               <Select.Trigger className="admin-filter-group-select" aria-label="分组筛选" />

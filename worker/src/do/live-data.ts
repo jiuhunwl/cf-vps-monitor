@@ -175,8 +175,9 @@ interface AgentPolicyMessage {
   // 只有在后台确实存有该节点的重置日时才下发；缺省时探针保留自己的
   // --traffic-reset-day / 环境变量取值，不会被一个「默认 1」悄悄改掉。
   traffic_reset_day?: number;
-  // 面板下发的升级命令（每节点至多 1 条未决）。release_base/proxy/ghproxy 由
-  // 安装器 root 侧 argv 决定，Worker 永远不下发这三个字段。
+  // 面板下发的升级命令（每节点至多 1 条未决）。ghproxy 是面板侧显式选择的
+  // GitHub 加速前缀（https 源站前缀，RPC/Worker 双重校验，节点侧仍验 SHA256）；
+  // release_base/proxy 依旧由安装器 root 侧 argv 决定，Worker 永远不下发。
   upgrade_tasks?: db.AgentUpgradeTask[];
   timestamp: number;
 }
@@ -1324,12 +1325,12 @@ export class LiveDataDO {
     }
   }
 
-  /** 把节点未决命令转成下发最小集（只含 id + target_version，绝不带下载来源）。*/
+  /** 把节点未决命令转成下发集（id + target_version + 面板选择的加速前缀）。*/
   private async upgradeTasksForPolicy(now: number, clientId?: string): Promise<db.AgentUpgradeTask[]> {
     const commands = await this.getAgentUpgradeTasksForClient(now, clientId);
     if (commands.length === 0) return [];
     const cmd = commands[0];
-    return [{ id: cmd.id, target_version: cmd.target_version }];
+    return [{ id: cmd.id, target_version: cmd.target_version, ghproxy: cmd.ghproxy || undefined }];
   }
 
   private activeViewerCount(now: number): number {
