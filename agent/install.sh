@@ -1419,6 +1419,10 @@ CF_MONITOR_NIC_INCLUDE=$($env_quote "$NIC_INCLUDE")
 CF_MONITOR_NIC_EXCLUDE=$($env_quote "$NIC_EXCLUDE")
 CF_MONITOR_TRAFFIC_RESET_DAY=$($env_quote "$TRAFFIC_RESET_DAY")
 CF_MONITOR_TRAFFIC_STATE_FILE=$($env_quote "${STATE_DIR}/traffic-state.json")
+# 运行中的 Agent 靠这两项组装面板升级的目标单元名与监督模式；
+# 缺了它们，非 default 实例会按 "default" 兜底去找错误的 -upgrade 单元。
+CF_MONITOR_INSTANCE_ID=$($env_quote "$BASE_ID")
+CF_MONITOR_SERVICE_MODE=$($env_quote "$SERVICE_MODE")
 EOF
 }
 
