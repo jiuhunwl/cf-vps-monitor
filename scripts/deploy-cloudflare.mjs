@@ -1,14 +1,19 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { prepareCloudflareVerificationEnv } from './cloudflare-build-tools.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const wrangler = join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
 const sourceConfig = join(root, 'wrangler.toml');
 const deployConfig = join(root, 'worker', '.tmp', 'wrangler-deploy.toml');
 const deploySecretsFile = join(root, 'worker', '.tmp', 'wrangler-secrets.json');
+// npm 可能把 wrangler 提升到仓库根，也可能嵌在 worker workspace 下
+// （wrangler 4.156 起就是后者），两种布局都要能找到。
+const wranglerCandidates = [
+  join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js'),
+  join(root, 'worker', 'node_modules', 'wrangler', 'bin', 'wrangler.js'),
+];
 const requiredSecrets = ['JWT_SECRET'];
 const supabaseSecretNames = ['SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
 const deployArgs = process.argv.slice(2);
@@ -56,6 +61,10 @@ if (!isDryRun && isWorkersBuild) {
 }
 
 function runWrangler(args, options = {}) {
+  const wrangler = wranglerCandidates.find(candidate => existsSync(candidate));
+  if (!wrangler) {
+    fail(`Cannot locate wrangler; expected one of:\n${wranglerCandidates.join('\n')}`);
+  }
   return spawnSync(process.execPath, [wrangler, ...args], {
     cwd: root,
     encoding: 'utf8',

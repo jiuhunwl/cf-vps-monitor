@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,10 +29,10 @@ function runDeployment({ verificationStatus = 0, ciGateStatus = 0, buildStatus =
   };
   let status = 0;
   try {
-    new Function('mkdirSync', 'readFileSync', 'rmSync', 'writeFileSync', 'dirname', 'join', 'fileURLToPath', 'spawnSync', 'process', 'console', 'prepareCloudflareVerificationEnv', source)(
+    new Function('mkdirSync', 'readFileSync', 'rmSync', 'writeFileSync', 'existsSync', 'dirname', 'join', 'fileURLToPath', 'spawnSync', 'process', 'console', 'prepareCloudflareVerificationEnv', source)(
       path => writes.push(path),
       () => 'name = "synthetic-worker"\nmain = "worker/src/index.ts"\n[vars]\nSUPABASE_URL = "https://PROJECT_REF.supabase.co"\n',
-      path => writes.push(path), path => writes.push(path), dirname, join, fileURLToPath, spawn, fakeProcess,
+      path => writes.push(path), path => writes.push(path), existsSync, dirname, join, fileURLToPath, spawn, fakeProcess,
       { log() {}, error() {} },
       () => { if (preparationFails) throw new Error('Synthetic tool preparation failure'); return fakeProcess.env; },
     );
