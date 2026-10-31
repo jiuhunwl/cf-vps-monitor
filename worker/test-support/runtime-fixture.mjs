@@ -1,10 +1,18 @@
-import { Miniflare, Log, LogLevel } from 'miniflare';
+import { createRequire } from 'node:module';
 import { build } from 'esbuild';
 import { readFile, mkdir, mkdtemp } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createTestDatabase } from '../../scripts/test-support/postgres.mjs';
 
 const root = new URL('../../', import.meta.url);
+
+// Miniflare must come from the repo-root install: the root overrides pin its
+// sharp/undici to patched releases, and npm cannot apply overrides inside a
+// workspace's own dependency subtree, so any miniflare resolved from worker/
+// would carry miniflare 4.x's exact-pinned vulnerable sharp 0.35.2/undici 7.28.0.
+const { Miniflare, Log, LogLevel } = await import(
+  pathToFileURL(createRequire(new URL('package.json', root)).resolve('miniflare'))
+);
 export const runtimeSecrets = {
   JWT_SECRET: 'synthetic-runtime-jwt-secret-at-least-32-bytes',
   SUPABASE_SECRET_KEY: 'sb_secret_synthetic_runtime_only',
