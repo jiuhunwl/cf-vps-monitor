@@ -16,6 +16,14 @@ const wranglerCandidates = [
 ];
 const requiredSecrets = ['JWT_SECRET'];
 const supabaseSecretNames = ['SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
+// 部署前用即将写入的 URL+key 探测 Supabase Data API：密钥被 Supabase 拒收时
+// 当场终止发布，而不是发布出一个只会 500 的面板。
+const SUPABASE_AUTH_PROBE_SCRIPT = [
+  'const url = process.env.SB_PROBE_URL, key = process.env.SB_PROBE_KEY;',
+  'fetch(url.replace(/\\/$/, "") + "/rest/v1/", { headers: { apikey: key, Authorization: "Bearer " + key } })',
+  '  .then(response => { console.log(response.status); process.exit(response.status === 401 || response.status === 403 ? 2 : 0); })',
+  '  .catch(error => { console.error(error.cause && error.cause.code || error.message); process.exit(1); });',
+].join('\n');
 const deployArgs = process.argv.slice(2);
 const isDryRun = deployArgs.includes('--dry-run');
 const isWorkersBuild = process.env.WORKERS_CI === '1';
@@ -111,6 +119,9 @@ function workerAlreadyDeployed(name) {
 const { name: workerName, fromEnv: workerNameFromEnv } = resolveWorkerName();
 /** true 表示复用线上已有的 SUPABASE_URL：从生成的配置里省略它，并强制 --keep-vars。 */
 let reuseDeployedSupabaseUrl = false;
+/** 本次部署将写入的 SUPABASE_URL 与 Supabase 密钥；供发布前探测使用。 */
+let deployedSupabaseUrl = '';
+let deploySupabaseKey = '';
 
 function resolveSupabaseUrl({ allowDryRunFallback = false } = {}) {
   const envUrl = process.env.SUPABASE_URL?.trim();
@@ -146,6 +157,7 @@ function resolveSupabaseUrl({ allowDryRunFallback = false } = {}) {
 function writeDeployConfig() {
   const source = readFileSync(sourceConfig, 'utf8');
   const supabaseUrl = resolveSupabaseUrl({ allowDryRunFallback: isDryRun });
+  deployedSupabaseUrl = supabaseUrl === null ? '' : supabaseUrl;
   const commit = currentGitCommit();
   let generated = supabaseUrl === null
     // 整行删掉，配置里不含该变量 + --keep-vars ⇒ Cloudflare 保留线上已有值
@@ -179,7 +191,35 @@ function writeDeploySecretsFile() {
 
   mkdirSync(dirname(deploySecretsFile), { recursive: true });
   writeFileSync(deploySecretsFile, JSON.stringify(secrets), { mode: 0o600 });
+  deploySupabaseKey = secrets.SUPABASE_SECRET_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY || '';
   return true;
+}
+
+/** 部署前探测：用本次将要写入的 SUPABASE_URL + 密钥访问 Data API。
+ *  401/403 说明密钥已被 Supabase 拒收（换 key、项目迁移、填错值），
+ *  此时发布出去的面板只会 500，必须当场拦截。网络类失败不拦发布，
+ *  只警告——项目暂停/瞬时抖动不应阻塞部署。 */
+function probeSupabaseAuth() {
+  if (!deployedSupabaseUrl || !deploySupabaseKey) return;
+  const probe = spawnSync(process.execPath, ['-e', SUPABASE_AUTH_PROBE_SCRIPT], {
+    cwd: root, encoding: 'utf8', timeout: 30000, windowsHide: true,
+    env: { ...process.env, SB_PROBE_URL: deployedSupabaseUrl, SB_PROBE_KEY: deploySupabaseKey },
+  });
+  if (probe.status === 0) {
+    console.log('Supabase key check passed.');
+    return;
+  }
+  if (probe.status === 2) {
+    fail([
+      'Supabase rejected the SUPABASE_SECRET_KEY this deployment would install (HTTP 401/403).',
+      'Publishing now would leave the panel serving Internal Server Error until the key is fixed.',
+      '',
+      'Fix: update SUPABASE_SECRET_KEY in Workers Builds > Settings > Build > Variables and Secrets',
+      '(Production environment) with the current sb_secret_ value from Supabase > Project Settings > API Keys,',
+      'then redeploy. Secrets are write-only in Cloudflare; Supabase is the re-viewable source of truth.',
+    ].join('\n'));
+  }
+  console.error(`Supabase key check skipped (deploying anyway): ${String(probe.stderr || probe.stdout || 'probe did not complete').trim().slice(0, 200)}`);
 }
 
 function checkSecrets() {
@@ -229,6 +269,8 @@ if (isDryRun) {
 if (!keepsExistingVars && !hasDeploySecretsFile) {
   checkSecrets();
 }
+
+probeSupabaseAuth();
 
 console.log('Deploying Worker. Initialize the database after deploy at /db-init.');
 

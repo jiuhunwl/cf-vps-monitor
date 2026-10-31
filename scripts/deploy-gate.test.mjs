@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const deploymentUrl = new URL('./deploy-cloudflare.mjs', import.meta.url);
 const deploymentSource = await readFile(deploymentUrl, 'utf8');
 
-function runDeployment({ verificationStatus = 0, ciGateStatus = 0, buildStatus = 0, args = [], preparationFails = false, env = {}, checkoutChangesDuringBuild = false } = {}) {
+function runDeployment({ verificationStatus = 0, ciGateStatus = 0, buildStatus = 0, args = [], preparationFails = false, env = {}, checkoutChangesDuringBuild = false, supabaseProbeStatus = 0 } = {}) {
   const imports = deploymentSource.match(/^import .+;\r?$/gm) || [];
   assert.ok(imports.length >= 4, 'execute the actual deploy script with explicit I/O replacements');
   const source = deploymentSource.replace(/^import .+;\r?$/gm, '').replaceAll('import.meta.url', JSON.stringify(deploymentUrl.href));
@@ -21,6 +21,11 @@ function runDeployment({ verificationStatus = 0, ciGateStatus = 0, buildStatus =
   const spawn = (command, argv) => {
     calls.push({ command, args: argv });
     if (/npm(?:\.cmd)?$/.test(command)) return { status: argv[1] === 'build' ? buildStatus : verificationStatus, stdout: '', stderr: '' };
+    if (argv[0] === '-e') {
+      // Supabase 发布前探测：0 = 通过，2 = 密钥被拒收（401/403），1 = 网络类失败。
+      if (supabaseProbeStatus === 2) return { status: 2, stdout: '', stderr: '401' };
+      return { status: 0, stdout: '200', stderr: '' };
+    }
     if (argv[0]?.endsWith('github-ci-gate.mjs')) return { status: ciGateStatus, stdout: '', stderr: '' };
     if (command === 'git' && argv[0] === 'diff') return { status: checkoutChangesDuringBuild ? 1 : 0, stdout: '', stderr: '' };
     if (command === 'git') return { status: 0, stdout: 'a'.repeat(40), stderr: '' };
@@ -61,6 +66,15 @@ test('AUD-19 successful verification precedes deployment and preserves requested
   const deploy = result.calls.findIndex(call => call.args.includes('deploy'));
   assert.ok(verification >= 0 && verification < deploy, 'full verification must precede the actual deploy subprocess');
   assert.ok(result.calls[deploy].args.includes('synthetic-target'));
+});
+
+test('Supabase key rejection stops deployment before any Wrangler side effects', () => {
+  const result = runDeployment({ supabaseProbeStatus: 2 });
+  assert.notEqual(result.status, 0, 'a rejected Supabase key must fail the deployment entrypoint');
+  const probe = result.calls.findIndex(call => call.args[0] === '-e');
+  assert.ok(probe >= 0, 'the auth probe must run before publishing');
+  assert.equal(result.calls.some(call => call.args[0]?.endsWith('wrangler.js')), false,
+    'a 401/403 from Supabase must stop the deploy before Wrangler runs');
 });
 
 test('AUD-19 local dry-run remains a build inspection without publishing or recursive verification', () => {
