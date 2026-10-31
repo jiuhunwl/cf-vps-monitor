@@ -10,7 +10,7 @@
 -- 判定：
 --   - 全部 OK            -> 数据库已是最新，无需执行 UPGRADE_ALL_safe.sql
 --   - 有「缺失」           -> 执行 supabase/tools/UPGRADE_ALL_safe.sql 后再跑一次本脚本
---  本文件由官方迁移文件解析生成，共 413 个检查项
+--  本文件由官方迁移文件解析生成，共 414 个检查项
 -- =====================================================================
 
 -- ① 版本标记速查 -------------------------------------------------------
@@ -73,6 +73,7 @@ with expected(kind, tbl, obj) as (
     ('column', 'agent_upgrade_commands', 'failure_reason'),
     ('column', 'agent_upgrade_commands', 'final_version'),
     ('column', 'agent_upgrade_commands', 'from_version'),
+    ('column', 'agent_upgrade_commands', 'ghproxy'),
     ('column', 'agent_upgrade_commands', 'id'),
     ('column', 'agent_upgrade_commands', 'requested_by'),
     ('column', 'agent_upgrade_commands', 'status'),

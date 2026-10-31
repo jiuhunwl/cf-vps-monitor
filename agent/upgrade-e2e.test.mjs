@@ -116,7 +116,7 @@ test('前端覆盖了全部 8 个 status 枚举', () => {
 /* ============================================================= */
 
 const COMMAND_FIELDS = [
-  'id', 'client_uuid', 'target_version', 'requested_by', 'status',
+  'id', 'client_uuid', 'target_version', 'requested_by', 'ghproxy', 'status',
   'from_version', 'final_version', 'failure_code', 'failure_reason',
   'created_at', 'dispatched_at', 'completed_at', 'updated_at',
 ];
@@ -129,24 +129,27 @@ test('Worker types.ts 声明了所有 AgentUpgradeCommand 字段', () => {
 });
 
 /* ============================================================= */
-/* 4. 安全约束：三端源码均不向面板透传下载来源                     */
+/* 4. 安全约束：ghproxy 是唯一放行的面板侧来源字段（https 校验 + 节点侧     */
+/*    SHA256 兜底），release_base/proxy 仍然禁止透传                      */
 /* ============================================================= */
 
-test('前端 agentUpgrade.ts 不引用 release_base/proxy/ghproxy', () => {
+test('前端 agentUpgrade.ts 的下载来源仅限 ghproxy，不引用 release_base/proxy', () => {
   const src = read('frontend/src/utils/agentUpgrade.ts');
   assert.ok(!/release_base/.test(src), '前端不得引用 release_base');
-  assert.ok(!/\bproxy\b/.test(src) || /noProxy|proxyUrl.*disable|不透传/.test(src), '前端不得透传 proxy');
-  assert.ok(!/ghproxy/.test(src), '前端不得引用 ghproxy');
+  assert.ok(!/\bproxy\b/.test(src), '前端不得透传通用 proxy');
+  // ghproxy 是所有者决策放行的面板侧加速前缀：https 校验在 RPC/Worker 双重把关，
+  // 节点侧升级仍校验 SHA256SUMS，镜像无法静默调包。
+  assert.ok(/ghproxy/.test(src), '前端必须支持面板选择的 ghproxy 透传');
 });
 
-test('Worker upgrade_tasks 下发只含 {id, target_version}，不含来源字段', () => {
+test('Worker upgrade_tasks 下发含 {id, target_version, ghproxy?}，不含其余来源字段', () => {
   const live = read('worker/src/do/live-data.ts');
   // 找 upgrade_tasks 的组装点
   const m = live.match(/upgrade_tasks[\s\S]{0,400}?map[\s\S]{0,200}?return/g);
   if (m) {
     for (const seg of m) {
       assert.ok(!/release_base/.test(seg), 'upgrade_tasks 组装不得含 release_base');
-      assert.ok(!/ghproxy/.test(seg), 'upgrade_tasks 组装不得含 ghproxy');
+      assert.ok(!/\bproxy\b(?!.*ghproxy)/.test(seg), 'upgrade_tasks 组装不得含通用 proxy');
     }
   }
 });

@@ -1,5 +1,5 @@
 -- ============================================================
--- cf-vps-monitor 全量安全升级 SQL（v2.0.5）
+-- cf-vps-monitor 全量安全升级 SQL（v2.0.6）
 -- 由官方迁移 1~5 号拼接，全部幂等：表/列/索引/函数已存在则跳过
 -- 可直接在 Supabase SQL Editor 一次性执行，重复执行也不报错
 -- 建议先备份：Supabase 控制台 -> Backups
@@ -6527,6 +6527,10 @@ create index if not exists idx_agent_upgrade_commands_client
   on agent_upgrade_commands (client_uuid, status);
 create index if not exists idx_agent_upgrade_commands_created
   on agent_upgrade_commands (created_at desc);
+-- 下发时可选的 GitHub 加速前缀（仅 https 源站前缀，写 RPC 校验格式；
+-- 节点侧升级流程仍校验 SHA256SUMS，镜像无法静默调包）。
+alter table agent_upgrade_commands
+  add column if not exists ghproxy text not null default '';
 
 -- Upgrade commands carry node-management authority. Restrict this table itself,
 -- not only the RPCs: shared Supabase defaults must not expose a writable queue.
@@ -6955,6 +6959,8 @@ declare
   v_client_uuids text[] := coalesce(array(select jsonb_array_elements_text(input->'client_uuids')), '{}'::text[]);
   v_target_version text := coalesce(input->>'target_version', '');
   v_requested_by  text := coalesce(input->>'requested_by', '');
+  -- GitHub 加速前缀：空 = 直连；非空必须是 https 源站前缀（无 userinfo/查询/片段/空白）。
+  v_ghproxy       text := coalesce(input->>'ghproxy', '');
   v_uuid text;
   v_created int := 0;
   v_skipped jsonb := '[]'::jsonb;
@@ -6970,6 +6976,19 @@ begin
       'skipped', jsonb_build_array(),
       'commands', '[]'::jsonb,
       'invalid_target', true
+    );
+  end if;
+  -- 与前端 normalizeGitHubProxyUrl 同型的宽松校验：https + 安全字符集 + 长度上限；
+  -- 节点侧引擎/安装器会在执行前再做严格校验，格式不对只会升级失败，不会提权。
+  if v_ghproxy <> '' and (
+    char_length(v_ghproxy) > 200
+    or v_ghproxy !~* '^https://[a-z0-9][a-z0-9.-]*(:[0-9]+)?(/[a-z0-9._~:/-]*)?$'
+  ) then
+    return jsonb_build_object(
+      'created', 0,
+      'skipped', jsonb_build_array(),
+      'commands', '[]'::jsonb,
+      'invalid_ghproxy', true
     );
   end if;
   foreach v_uuid in array v_client_uuids loop
@@ -6989,8 +7008,8 @@ begin
       v_skipped := v_skipped || jsonb_build_object('client_uuid', v_uuid, 'reason', 'not_found');
       continue;
     end if;
-    insert into agent_upgrade_commands (client_uuid, target_version, requested_by)
-      values (v_uuid, v_target_version, v_requested_by)
+    insert into agent_upgrade_commands (client_uuid, target_version, requested_by, ghproxy)
+      values (v_uuid, v_target_version, v_requested_by, v_ghproxy)
       returning * into v_row;
     v_created := v_created + 1;
     v_commands := v_commands || jsonb_build_object(
@@ -6998,6 +7017,7 @@ begin
       'client_uuid', v_row.client_uuid,
       'target_version', v_row.target_version,
       'requested_by', v_row.requested_by,
+      'ghproxy', v_row.ghproxy,
       'status', v_row.status,
       'from_version', v_row.from_version,
       'final_version', v_row.final_version,
@@ -7058,6 +7078,7 @@ begin
     'client_uuid', v_row.client_uuid,
     'target_version', v_row.target_version,
     'requested_by', v_row.requested_by,
+    'ghproxy', v_row.ghproxy,
     'status', v_row.status,
     'from_version', v_row.from_version,
     'final_version', v_row.final_version,
