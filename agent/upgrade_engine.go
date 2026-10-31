@@ -41,6 +41,14 @@ type upgradeOptions struct {
 	healthTimeout time.Duration
 	proxy         string
 	ghProxy       string
+	// ghProxyAllowlistRaw 是 --install-ghproxy-allowlist 的原始逗号串，
+	// 在 parseUpgradeOptions 里拆分并校验后填入 ghProxyAllowlist。
+	ghProxyAllowlistRaw string
+	// ghProxyAllowlist 是 root 侧安装器 argv 批准的加速前缀集合：面板下发的
+	// request.ghproxy 命中它才被监督任务采纳，否则回退 argv 默认值。请求文件由
+	// 非 root Agent 写入，文件写入者只能在 root 批准的镜像里选择，无法把下载
+	// 指向任意主机——提权路径依然封死。
+	ghProxyAllowlist []string
 	// repository is the owner/repo used to build default download URLs.
 	repository string
 }

@@ -39,6 +39,7 @@ var (
 	upgradeFlagHealthFile    string
 	upgradeFlagProxy         string
 	upgradeFlagGhProxy       string
+	upgradeFlagGhProxyAllow  string
 )
 
 // registerUpgradeFlags wires the upgrade-related flags onto the default flag
@@ -55,6 +56,7 @@ func registerUpgradeFlags() {
 	flag.StringVar(&upgradeFlagHealthFile, "health-file", "", "Path to the Agent health beacon (default: <state dir>/agent-health.json)")
 	flag.StringVar(&upgradeFlagProxy, "proxy", "", "HTTP(S) proxy used for upgrades")
 	flag.StringVar(&upgradeFlagGhProxy, "install-ghproxy", "", "GitHub proxy prefix used for upgrades")
+	flag.StringVar(&upgradeFlagGhProxyAllow, "install-ghproxy-allowlist", "", "Comma-separated GitHub proxy prefixes the panel may select for upgrades")
 	// Intercepted before flag.Parse; declared so -h remains informative.
 	flag.Bool("upgrade-supervisor", false, "Run the root upgrade supervisor (intercepted before flag parsing)")
 	flag.Bool("upgrade-apply", false, "Apply one upgrade request as root (intercepted before flag parsing)")
@@ -160,6 +162,7 @@ func parseUpgradeOptions(args []string, stderr io.Writer) (upgradeOptions, bool,
 	flags.StringVar(&options.stateDir, "state-dir", "", "State directory")
 	flags.StringVar(&options.proxy, "proxy", "", "HTTP(S) proxy")
 	flags.StringVar(&options.ghProxy, "install-ghproxy", "", "GitHub proxy prefix")
+	flags.StringVar(&options.ghProxyAllowlistRaw, "install-ghproxy-allowlist", "", "Comma-separated GitHub proxy prefixes the panel may select")
 	flags.Bool("upgrade-apply", false, "Apply one upgrade request")
 	flags.Bool("upgrade-supervisor", false, "Run the upgrade supervisor")
 	flags.BoolVar(&once, "once", false, "Process one request then exit")
@@ -190,6 +193,11 @@ func parseUpgradeOptions(args []string, stderr io.Writer) (upgradeOptions, bool,
 	if err := requireHTTPSURL("--install-ghproxy", options.ghProxy); err != nil {
 		return options, once, err
 	}
+	allowlist, err := parseGhProxyAllowlist("--install-ghproxy-allowlist", options.ghProxyAllowlistRaw)
+	if err != nil {
+		return options, once, err
+	}
+	options.ghProxyAllowlist = allowlist
 	if err := requireHTTPSURL("--release-base", options.releaseBase); err != nil {
 		return options, once, err
 	}
@@ -331,13 +339,56 @@ func supervisorTask(options upgradeOptions, request upgradeRequest) upgradeTask 
 	if commandID == "" {
 		commandID = options.commandID
 	}
+	// request 文件由非 root Agent 写入，下载来源默认只认 argv；唯一例外是
+	// 面板下发的 ghproxy 命中了安装器批准的白名单——文件写入者只能在 root
+	// 批准的镜像里选择，无法把下载指向任意主机。未命中则回退 argv 默认值。
+	ghProxy := options.ghProxy
+	if requested := strings.TrimSpace(request.GhProxy); requested != "" && requested != ghProxy && ghProxyAllowlisted(options, requested) {
+		ghProxy = requested
+	}
 	return upgradeTask{
 		ID:            commandID,
 		TargetVersion: request.TargetVersion,
 		ReleaseBase:   options.releaseBase,
 		Proxy:         options.proxy,
-		GhProxy:       options.ghProxy,
+		GhProxy:       ghProxy,
 	}
+}
+
+// ghProxyAllowlisted reports whether the panel-requested accelerator was
+// approved by the root-side installer argv. An empty allowlist keeps the
+// historical "argv only" behaviour for units installed before the flag existed.
+func ghProxyAllowlisted(options upgradeOptions, candidate string) bool {
+	for _, allowed := range options.ghProxyAllowlist {
+		if allowed == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+// parseGhProxyAllowlist splits and validates the comma-separated allowlist.
+// Empty segments are dropped so trailing commas never smuggle an entry in.
+func parseGhProxyAllowlist(flagName, raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var allowlist []string
+	for _, segment := range strings.Split(raw, ",") {
+		entry := strings.TrimSpace(segment)
+		if entry == "" {
+			continue
+		}
+		normalized, err := normalizeProxyURL(flagName, entry)
+		if err != nil {
+			return nil, err
+		}
+		if err := requireHTTPSURL(flagName, normalized); err != nil {
+			return nil, err
+		}
+		allowlist = append(allowlist, normalized)
+	}
+	return allowlist, nil
 }
 
 // requestOriginFields names the download-origin fields a request attempted to
@@ -531,6 +582,9 @@ func upgradeApplyArgs(options upgradeOptions) []string {
 	if options.serviceMode != "" {
 		args = append(args, "--service-mode", options.serviceMode)
 	}
+	if len(options.ghProxyAllowlist) > 0 {
+		args = append(args, "--install-ghproxy-allowlist", strings.Join(options.ghProxyAllowlist, ","))
+	}
 	if options.instanceID != "" {
 		args = append(args, "--instance-id", options.instanceID)
 	}
@@ -556,6 +610,13 @@ func agentRuntimeUpgradeOptions() upgradeOptions {
 		healthTimeout: timeout,
 		proxy:         upgradeFlagProxy,
 		ghProxy:       upgradeFlagGhProxy,
+		ghProxyAllowlist: func() []string {
+			allowlist, err := parseGhProxyAllowlist("--install-ghproxy-allowlist", upgradeFlagGhProxyAllow)
+			if err != nil {
+				return nil
+			}
+			return allowlist
+		}(),
 	}
 }
 

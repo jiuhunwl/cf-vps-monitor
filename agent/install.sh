@@ -899,6 +899,8 @@ agent_upgrade_origin_args() {
   fi
   if [ -n "${INSTALL_GHPROXY:-}" ]; then
     args="$args --install-ghproxy $($quote_fn "$INSTALL_GHPROXY")"
+    # 白名单：面板下发的加速前缀只有命中它才被监督单元采纳（其余回退 argv）。
+    args="$args --install-ghproxy-allowlist $($quote_fn "$INSTALL_GHPROXY")"
   fi
   printf '%s' "$args"
 }

@@ -182,3 +182,53 @@ func TestSupervisorTaskFallsBackToArgvCommandID(t *testing.T) {
 		t.Fatalf("TargetVersion=%q, want v1.2.3", task.TargetVersion)
 	}
 }
+
+// 面板下发的加速前缀命中安装器白名单时被采纳：文件写入者只能在 root 批准的
+// 镜像里选择，无法把下载指向任意主机。
+func TestSupervisorTaskHonoursAllowlistedRequestGhProxy(t *testing.T) {
+	options := upgradeOptions{
+		ghProxy:          "https://gh-proxy.org",
+		ghProxyAllowlist: []string{"https://gh-proxy.org", "https://mirror.example.org"},
+	}
+	task := supervisorTask(options, upgradeRequest{
+		CommandID:     "cmd-1",
+		TargetVersion: "v1.2.3",
+		GhProxy:       "https://mirror.example.org",
+	})
+	if task.GhProxy != "https://mirror.example.org" {
+		t.Fatalf("GhProxy=%q, want the allowlisted request value", task.GhProxy)
+	}
+}
+
+// 未命中白名单的请求来源一律回退 argv 默认值——文件写入者无法把下载指到
+// 白名单之外的主机。
+func TestSupervisorTaskFallsBackToArgvWhenRequestGhProxyNotAllowlisted(t *testing.T) {
+	options := upgradeOptions{
+		ghProxy:          "https://gh-proxy.org",
+		ghProxyAllowlist: []string{"https://gh-proxy.org"},
+	}
+	task := supervisorTask(options, upgradeRequest{
+		CommandID:     "cmd-1",
+		TargetVersion: "v1.2.3",
+		GhProxy:       "https://attacker.example.com",
+	})
+	if task.GhProxy != "https://gh-proxy.org" {
+		t.Fatalf("GhProxy=%q, want the argv default", task.GhProxy)
+	}
+}
+
+// 空白名单（旧版安装器装的监督单元）维持既有契约：只认 argv，请求来源忽略。
+func TestSupervisorTaskWithoutAllowlistKeepsArgvOnlyOrigin(t *testing.T) {
+	options := upgradeOptions{ghProxy: "https://gh-proxy.org"}
+	task := supervisorTask(options, upgradeRequest{
+		CommandID:     "cmd-1",
+		TargetVersion: "v1.2.3",
+		GhProxy:       "https://gh-proxy.org",
+	})
+	if task.GhProxy != "https://gh-proxy.org" {
+		t.Fatalf("GhProxy=%q, want the argv value", task.GhProxy)
+	}
+	if task.ReleaseBase != "" || task.Proxy != "" {
+		t.Fatalf("task=%+v, want release_base/proxy untouched by the request", task)
+	}
+}
