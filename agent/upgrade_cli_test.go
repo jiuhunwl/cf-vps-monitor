@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,24 @@ func TestHandleUpgradeCLIRejectsUnknownFlag(t *testing.T) {
 	handled, code := handleUpgradeCLI([]string{"upgrade", "--bogus"}, &stdout, &stderr)
 	if !handled || code != 2 {
 		t.Fatalf("handled=%v code=%d, want true/2", handled, code)
+	}
+}
+
+// 单元文件驱动的监督调用必须容忍未来安装器写出的未知旗标（连同独立值）：
+// 新安装器重烘焙单元后，稍旧的二进制一启动就退出会打死所有下发升级。
+func TestHandleUpgradeCLISupervisorToleratesFutureFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	handled, code := handleUpgradeCLI([]string{
+		"--upgrade-supervisor", "--once",
+		"--state-dir", t.TempDir(),
+		"--some-future-flag", "future-value",
+		"--future-bool",
+	}, &stdout, &stderr)
+	if !handled {
+		t.Fatal("supervisor invocation must be handled")
+	}
+	if code == 2 {
+		t.Fatalf("code=2 stderr=%q: a future flag must be skipped, not rejected", stderr.String())
 	}
 }
 
@@ -230,5 +249,39 @@ func TestSupervisorTaskWithoutAllowlistKeepsArgvOnlyOrigin(t *testing.T) {
 	}
 	if task.ReleaseBase != "" || task.Proxy != "" {
 		t.Fatalf("task=%+v, want release_base/proxy untouched by the request", task)
+	}
+}
+
+// 版本偏差：新安装器写出的未知旗标（含独立值）必须被整体跳过，否则旧二进制
+// 的监督/应用进程一启动就退出，下发的升级全部超时。
+func TestFilterUnknownUpgradeFlagsDropsFutureFlags(t *testing.T) {
+	args := []string{
+		"--once",
+		"--state-dir", "/var/lib/state",
+		"--install-ghproxy-allowlist", "https://gh-proxy.org",
+		"--some-future-flag", "future-value",
+		"--mode=systemd",
+		"--service-name", "cf-vps-monitor-agent-default",
+		"--future-bool",
+	}
+	want := []string{
+		"--once",
+		"--state-dir", "/var/lib/state",
+		"--install-ghproxy-allowlist", "https://gh-proxy.org",
+		"--mode=systemd",
+		"--service-name", "cf-vps-monitor-agent-default",
+	}
+	got := filterUnknownUpgradeFlags(args)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered=%v, want %v", got, want)
+	}
+}
+
+// 已知旗标的值恰好以 - 开头时不得被误当未知旗标丢掉。
+func TestFilterUnknownUpgradeFlagsKeepsNegativeLookingValues(t *testing.T) {
+	got := filterUnknownUpgradeFlags([]string{"--service-name", "-weird-name", "--once"})
+	want := []string{"--service-name", "-weird-name", "--once"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered=%v, want %v", got, want)
 	}
 }

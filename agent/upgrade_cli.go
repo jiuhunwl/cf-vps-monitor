@@ -77,6 +77,13 @@ func handleUpgradeCLI(args []string, stdout, stderr io.Writer) (bool, int) {
 		return true, 0
 	}
 
+	// 监督/应用调用由单元文件（最新安装器写出）驱动，执行的可能是稍旧的
+	// 二进制：未知旗标必须在解析前跳过而不是让进程退出，否则一次重烘焙就
+	// 打死所有下发的升级。人类手敲的 `upgrade` 子命令保持快速报错（防手滑）。
+	if invocation == upgradeSupervisor || invocation == upgradeApply {
+		args = filterUnknownUpgradeFlags(args)
+	}
+
 	options, once, err := parseUpgradeOptions(args, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -132,6 +139,63 @@ func detectUpgradeInvocation(args []string) upgradeInvocation {
 	default:
 		return upgradeNone
 	}
+}
+
+// upgradeStringFlags / upgradeBoolFlags enumerate the flags parseUpgradeOptions
+// registers. The tolerant pre-filter drops anything else (with its standalone
+// value) so unit files written by a newer installer never hard-fail an older
+// binary's supervisor/apply invocation.
+var upgradeStringFlags = map[string]bool{
+	"release-tag": true, "release-base": true, "instance-id": true,
+	"install-dir": true, "service-name": true, "install-mode": true,
+	"mode": true, "service-mode": true, "health-file": true,
+	"state-dir": true, "proxy": true, "install-ghproxy": true,
+	"install-ghproxy-allowlist": true, "health-timeout": true,
+	"upgrade-health-timeout": true,
+}
+
+var upgradeBoolFlags = map[string]bool{
+	"upgrade-apply": true, "upgrade-supervisor": true,
+	"once": true, "version": true, "h": true, "help": true,
+}
+
+// filterUnknownUpgradeFlags drops flags that this binary's flag set does not
+// know (with their standalone values), so unit files written by a newer
+// installer never hard-fail an older binary's supervisor/apply invocation.
+// Only machine-written invocations go through this; the human-facing `upgrade`
+// subcommand keeps fail-fast typo protection.
+func filterUnknownUpgradeFlags(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || !strings.HasPrefix(arg, "-") {
+			filtered = append(filtered, arg)
+			continue
+		}
+		name := strings.TrimLeft(arg, "-")
+		inline := false
+		if eq := strings.Index(name, "="); eq >= 0 {
+			name = name[:eq]
+			inline = true
+		}
+		if upgradeStringFlags[name] || upgradeBoolFlags[name] {
+			filtered = append(filtered, arg)
+			// 独立值形式的字符串旗标：把它的值也原样保留。
+			if !inline && upgradeStringFlags[name] && i+1 < len(args) {
+				i++
+				filtered = append(filtered, args[i])
+			}
+			continue
+		}
+		// 未知旗标：连同独立值一起丢弃（值形态 `-x v` 的 v 不会以 - 开头）。
+		if !inline && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+		}
+	}
+	return filtered
 }
 
 // parseUpgradeOptions builds the option set from the dedicated flag set. Because
